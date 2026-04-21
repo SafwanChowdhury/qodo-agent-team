@@ -1,0 +1,1261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Qodo Agent Team</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --bg-panel: #1c2128;
+      --border: #30363d;
+      --border-active: #58a6ff;
+      --text-primary: #e6edf3;
+      --text-secondary: #8b949e;
+      --text-muted: #6e7681;
+      --accent: #58a6ff;
+      --accent-hover: #79c0ff;
+      --green: #3fb950;
+      --green-bg: rgba(63, 185, 80, 0.1);
+      --red: #f85149;
+      --red-bg: rgba(248, 81, 73, 0.1);
+      --yellow: #d29922;
+      --yellow-bg: rgba(210, 153, 34, 0.1);
+      --purple: #bc8cff;
+      --purple-bg: rgba(188, 140, 255, 0.1);
+      --orange: #f0883e;
+      --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+      --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      --radius: 8px;
+      --radius-sm: 6px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    .app { display: flex; flex-direction: column; height: 100vh; }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .header-left { display: flex; align-items: center; gap: 12px; }
+    .header-right { display: flex; align-items: center; gap: 8px; }
+    .logo {
+      font-size: 18px; font-weight: 700; color: var(--accent);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .logo svg { width: 24px; height: 24px; }
+    .header-status {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; color: var(--text-secondary);
+    }
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted);
+    }
+    .status-dot.planning { background: var(--purple); animation: pulse 1.5s infinite; }
+    .status-dot.plan-review { background: var(--purple); }
+    .status-dot.generating { background: var(--yellow); animation: pulse 1.5s infinite; }
+    .status-dot.running { background: var(--green); animation: pulse 1.5s infinite; }
+    .status-dot.chatting { background: var(--accent); animation: pulse 1.5s infinite; }
+    .status-dot.completed { background: var(--green); }
+    .status-dot.failed { background: var(--red); }
+    .status-dot.stopped { background: var(--red); }
+    .status-dot.error { background: var(--red); }
+
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    .main-content { flex: 1; display: flex; overflow: hidden; }
+
+    /* Buttons */
+    .btn {
+      padding: 8px 16px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+      background: var(--bg-tertiary); color: var(--text-primary);
+      font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: all 0.15s; white-space: nowrap;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .btn:hover { background: var(--border); }
+    .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+    .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-danger { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+    .btn-danger:hover { background: var(--red); color: #fff; }
+    .btn-success { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+    .btn-success:hover { background: var(--green); color: #fff; }
+    .btn-purple { background: var(--purple-bg); border-color: var(--purple); color: var(--purple); }
+    .btn-purple:hover { background: var(--purple); color: #fff; }
+    .btn-sm { padding: 6px 12px; font-size: 12px; }
+
+    /* Setup Panel */
+    .setup-panel {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      padding: 40px; overflow-y: auto;
+    }
+    .setup-card {
+      width: 100%; max-width: 760px;
+      background: var(--bg-secondary); border: 1px solid var(--border);
+      border-radius: 12px; padding: 32px;
+    }
+    .setup-card h2 { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+    .setup-card .subtitle { color: var(--text-secondary); font-size: 14px; margin-bottom: 24px; }
+
+    .form-group { margin-bottom: 20px; }
+    .form-group label {
+      display: block; font-size: 13px; font-weight: 600;
+      color: var(--text-secondary); margin-bottom: 6px;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .form-group .hint {
+      font-size: 11px; color: var(--text-muted); margin-top: 4px;
+      text-transform: none; letter-spacing: normal; font-weight: 400;
+    }
+
+    .folder-selector { display: flex; gap: 8px; }
+    .folder-input {
+      flex: 1; padding: 10px 14px;
+      background: var(--bg-tertiary); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); color: var(--text-primary);
+      font-family: var(--font-mono); font-size: 13px; outline: none;
+    }
+    .folder-input:focus { border-color: var(--accent); }
+
+    .model-row { display: flex; gap: 12px; }
+    .model-group { flex: 1; }
+    .model-group label { margin-bottom: 6px; }
+
+    select.model-select {
+      width: 100%; padding: 10px 14px;
+      background: var(--bg-tertiary); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); color: var(--text-primary);
+      font-size: 13px; outline: none; cursor: pointer;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b949e' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 32px;
+    }
+    select.model-select:focus { border-color: var(--accent); }
+    select.model-select option { background: var(--bg-tertiary); color: var(--text-primary); }
+    select.model-select optgroup { color: var(--text-secondary); font-style: normal; }
+
+    .prompt-textarea {
+      width: 100%; min-height: 160px; padding: 14px;
+      background: var(--bg-tertiary); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); color: var(--text-primary);
+      font-family: var(--font-sans); font-size: 14px; line-height: 1.6;
+      resize: vertical; outline: none;
+    }
+    .prompt-textarea:focus { border-color: var(--accent); }
+    .prompt-textarea::placeholder { color: var(--text-muted); }
+
+    .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+
+    /* Folder browser modal */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center; z-index: 100;
+    }
+    .modal {
+      background: var(--bg-secondary); border: 1px solid var(--border);
+      border-radius: 12px; width: 520px; max-height: 70vh;
+      display: flex; flex-direction: column;
+    }
+    .modal-header {
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .modal-header h3 { font-size: 16px; font-weight: 600; }
+    .modal-body { flex: 1; overflow-y: auto; padding: 8px 0; }
+    .modal-current-path {
+      padding: 8px 20px; font-family: var(--font-mono); font-size: 12px;
+      color: var(--text-secondary); border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .folder-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 20px; cursor: pointer; font-size: 14px; transition: background 0.1s;
+    }
+    .folder-item:hover { background: var(--bg-tertiary); }
+    .folder-item .icon { color: var(--accent); font-size: 16px; width: 20px; text-align: center; }
+    .modal-footer {
+      padding: 12px 20px; border-top: 1px solid var(--border);
+      display: flex; justify-content: flex-end; gap: 8px;
+    }
+
+    /* Run view */
+    .run-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    .prompt-display {
+      padding: 10px 20px; background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      font-size: 13px; color: var(--text-secondary);
+      max-height: 60px; overflow: hidden; cursor: pointer; flex-shrink: 0;
+    }
+    .prompt-display:hover { max-height: none; }
+    .prompt-display strong { color: var(--text-primary); margin-right: 8px; }
+
+    /* Stepper */
+    .stepper {
+      display: flex; align-items: center; gap: 0;
+      padding: 12px 20px; background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .step {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; color: var(--text-muted);
+    }
+    .step.active { color: var(--text-primary); }
+    .step.done { color: var(--green); }
+    .step.error { color: var(--red); }
+    .step-num {
+      width: 24px; height: 24px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700;
+      background: var(--bg-tertiary); border: 1px solid var(--border);
+    }
+    .step.active .step-num { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .step.done .step-num { background: var(--green); border-color: var(--green); color: #fff; }
+    .step.error .step-num { background: var(--red); border-color: var(--red); color: #fff; }
+    .step-connector {
+      width: 40px; height: 1px; background: var(--border); margin: 0 8px;
+    }
+    .step-connector.done { background: var(--green); }
+
+    /* Tab bar */
+    .tab-bar {
+      display: flex; gap: 0; padding: 0 20px;
+      background: var(--bg-secondary); border-bottom: 1px solid var(--border);
+      flex-shrink: 0; overflow-x: auto;
+    }
+    .tab {
+      padding: 10px 16px; font-size: 13px; font-weight: 500;
+      color: var(--text-secondary); cursor: pointer;
+      border-bottom: 2px solid transparent; transition: all 0.15s;
+      white-space: nowrap; display: flex; align-items: center; gap: 6px;
+    }
+    .tab:hover { color: var(--text-primary); }
+    .tab.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+    .tab .phase-status {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    }
+    .tab .phase-status.running { background: var(--yellow); animation: pulse 1.5s infinite; }
+    .tab .phase-status.completed { background: var(--green); }
+    .tab .phase-status.failed { background: var(--red); }
+    .tab .phase-status.skipped { background: var(--text-muted); }
+
+    /* Terminal output */
+    .output-area { flex: 1; overflow: hidden; position: relative; }
+    .terminal {
+      height: 100%; overflow-y: auto; padding: 16px 20px;
+      font-family: var(--font-mono); font-size: 13px; line-height: 1.7;
+      white-space: pre-wrap; word-break: break-word; background: var(--bg-primary);
+    }
+    .terminal::-webkit-scrollbar { width: 8px; }
+    .terminal::-webkit-scrollbar-track { background: transparent; }
+    .terminal::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    .t-green { color: var(--green); }
+    .t-red { color: var(--red); }
+    .t-yellow { color: var(--yellow); }
+    .t-blue { color: var(--accent); }
+    .t-purple { color: var(--purple); }
+    .t-muted { color: var(--text-muted); }
+    .t-bold { font-weight: 700; }
+
+    /* Plan review */
+    .plan-review-area {
+      flex: 1; display: flex; flex-direction: column; overflow: hidden;
+    }
+    .plan-content {
+      flex: 1; overflow-y: auto; padding: 20px;
+      font-family: var(--font-sans); font-size: 14px; line-height: 1.7;
+      background: var(--bg-primary);
+    }
+    .plan-content h1, .plan-content h2, .plan-content h3 {
+      color: var(--accent); margin: 16px 0 8px 0;
+    }
+    .plan-content h1 { font-size: 20px; }
+    .plan-content h2 { font-size: 17px; }
+    .plan-content h3 { font-size: 15px; }
+    .plan-content p { margin: 8px 0; }
+    .plan-content ul, .plan-content ol { margin: 8px 0 8px 24px; }
+    .plan-content li { margin: 4px 0; }
+    .plan-content code {
+      background: var(--bg-tertiary); padding: 2px 6px; border-radius: 3px;
+      font-family: var(--font-mono); font-size: 12px;
+    }
+    .plan-content pre {
+      background: var(--bg-tertiary); padding: 12px; border-radius: var(--radius-sm);
+      overflow-x: auto; margin: 8px 0;
+    }
+    .plan-content pre code { background: none; padding: 0; }
+    .plan-content strong { color: var(--text-primary); }
+    .plan-content blockquote {
+      border-left: 3px solid var(--accent); padding-left: 12px;
+      color: var(--text-secondary); margin: 8px 0;
+    }
+    .plan-content table {
+      border-collapse: collapse; margin: 8px 0; width: 100%;
+    }
+    .plan-content th, .plan-content td {
+      border: 1px solid var(--border); padding: 6px 10px; text-align: left;
+    }
+    .plan-content th { background: var(--bg-tertiary); font-weight: 600; }
+
+    .plan-actions {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 20px; background: var(--bg-secondary);
+      border-top: 1px solid var(--border); flex-shrink: 0;
+    }
+    .plan-actions-left { display: flex; align-items: center; gap: 8px; }
+    .plan-actions-right { display: flex; align-items: center; gap: 8px; }
+
+    .plan-edit-textarea {
+      width: 100%; min-height: 60px; max-height: 120px; padding: 10px;
+      background: var(--bg-tertiary); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); color: var(--text-primary);
+      font-family: var(--font-sans); font-size: 13px; line-height: 1.5;
+      resize: vertical; outline: none;
+    }
+    .plan-edit-textarea:focus { border-color: var(--accent); }
+
+    .replan-bar {
+      padding: 10px 20px; background: var(--bg-panel);
+      border-top: 1px solid var(--border); flex-shrink: 0;
+      display: flex; gap: 8px;
+    }
+    .replan-bar input {
+      flex: 1; padding: 8px 12px;
+      background: var(--bg-tertiary); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); color: var(--text-primary);
+      font-family: var(--font-sans); font-size: 13px; outline: none;
+    }
+    .replan-bar input:focus { border-color: var(--accent); }
+
+    /* Script preview */
+    .script-preview {
+      height: 100%; overflow-y: auto; padding: 16px 20px;
+      font-family: var(--font-mono); font-size: 12px; line-height: 1.6;
+      white-space: pre-wrap; word-break: break-word;
+      background: var(--bg-primary); color: var(--text-secondary);
+    }
+
+    /* Parallel view */
+    .parallel-view {
+      flex: 1; display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+      gap: 1px; background: var(--border); overflow: hidden;
+    }
+    .parallel-pane {
+      display: flex; flex-direction: column; background: var(--bg-primary); overflow: hidden;
+    }
+    .parallel-pane-header {
+      padding: 8px 14px; background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      font-size: 12px; font-weight: 600;
+      display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
+    }
+    .parallel-pane-header .pane-status { display: flex; align-items: center; gap: 6px; }
+    .parallel-pane .terminal { font-size: 12px; line-height: 1.6; padding: 10px 14px; }
+
+    /* Respond / Chat bar */
+    .respond-bar {
+      display: flex; gap: 8px; padding: 10px 20px;
+      background: var(--bg-secondary); border-top: 1px solid var(--border); flex-shrink: 0;
+    }
+    .respond-bar input {
+      flex: 1; padding: 8px 12px;
+      background: var(--bg-tertiary); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); color: var(--text-primary);
+      font-family: var(--font-mono); font-size: 13px; outline: none;
+    }
+    .respond-bar input:focus { border-color: var(--accent); }
+
+    /* Empty state */
+    .empty-state {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%; color: var(--text-muted); font-size: 14px; gap: 8px;
+    }
+    .empty-state .icon { font-size: 32px; margin-bottom: 8px; }
+
+    /* Spinner */
+    .spinner {
+      display: inline-block; width: 14px; height: 14px;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @media (max-width: 768px) {
+      .setup-card { padding: 20px; }
+      .parallel-view { grid-template-columns: 1fr; }
+      .model-row { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app" class="app"></div>
+
+  <script>
+    // =========================================================================
+    // State
+    // =========================================================================
+    const state = {
+      view: 'setup',
+      projectPath: '',
+      prompt: '',
+      planModel: 'anthropic/claude-sonnet-4-6',
+      generateModel: 'anthropic/claude-sonnet-4-6',
+      models: [],
+      runId: null,
+      runStatus: null,
+      mainOutput: '',
+      planOutput: '',
+      planStreaming: '',
+      planConversation: [],  // { role: 'user'|'agent', content: string }
+      phases: {},
+      activeTab: 'main',
+      scriptContent: '',
+      generationOutput: '',
+      showFolderBrowser: false,
+      browserPath: '',
+      browserDirs: [],
+      browserParent: '',
+    };
+
+    let socket = null;
+
+    // =========================================================================
+    // Socket.IO
+    // =========================================================================
+    function connectSocket() {
+      socket = io();
+
+      socket.on('run:created', ({ runId }) => {
+        state.runId = runId;
+        state.view = 'run';
+        state.mainOutput = '';
+        state.planOutput = '';
+        state.planStreaming = '';
+        state.phases = {};
+        state.scriptContent = '';
+        state.generationOutput = '';
+        state.activeTab = 'main';
+        state.showReplanInput = false;
+        render();
+      });
+
+      socket.on('run:status', ({ status }) => {
+        state.runStatus = status;
+        render();
+      });
+
+      socket.on('run:output', ({ stream, data }) => {
+        if (stream === 'main') {
+          state.mainOutput += data;
+          if (state.activeTab === 'main') renderTerminal();
+        }
+      });
+
+      socket.on('run:plan-stream', ({ data }) => {
+        state.planStreaming += data;
+        if (state.activeTab === 'plan') renderPlanContent();
+      });
+
+      socket.on('run:plan', ({ content }) => {
+        state.planOutput = content;
+        state.planStreaming = content;
+        state.activeTab = 'plan';
+        render();
+      });
+
+      socket.on('run:plan-conversation', ({ conversation }) => {
+        state.planConversation = conversation;
+        render();
+      });
+
+      socket.on('run:generation', ({ data }) => {
+        state.generationOutput += data;
+      });
+
+      socket.on('run:script', ({ content }) => {
+        state.scriptContent = content;
+        render();
+      });
+
+      socket.on('run:phase', ({ phaseId, label, status, model, output }) => {
+        if (!state.phases[phaseId]) {
+          state.phases[phaseId] = { label, status, model, output: output || '' };
+        } else {
+          if (label) state.phases[phaseId].label = label;
+          if (status) state.phases[phaseId].status = status;
+          if (model) state.phases[phaseId].model = model;
+        }
+        render();
+      });
+
+      socket.on('run:phase-output', ({ phaseId, data }) => {
+        if (!state.phases[phaseId]) {
+          state.phases[phaseId] = { label: phaseId, status: 'running', output: '' };
+        }
+        state.phases[phaseId].output += data;
+        if (state.activeTab === phaseId || state.activeTab === 'parallel') {
+          renderTerminal();
+        }
+      });
+
+      socket.on('run:error', ({ error }) => {
+        state.mainOutput += `\n❌ ERROR: ${error}\n`;
+        renderTerminal();
+      });
+    }
+
+    // =========================================================================
+    // API calls
+    // =========================================================================
+    async function loadModels() {
+      try {
+        const res = await fetch('/api/models');
+        state.models = await res.json();
+      } catch (e) {
+        console.error('Failed to load models:', e);
+      }
+    }
+
+    async function browseFolders(dirPath) {
+      const res = await fetch(`/api/browse?path=${encodeURIComponent(dirPath || '')}`);
+      const data = await res.json();
+      state.browserPath = data.current;
+      state.browserDirs = data.dirs;
+      state.browserParent = data.parent;
+      render();
+    }
+
+    function startRun() {
+      if (!state.projectPath || !state.prompt) return;
+      socket.emit('run:start', {
+        prompt: state.prompt,
+        projectPath: state.projectPath,
+        planModel: state.planModel,
+        generateModel: state.generateModel,
+      });
+    }
+
+    function approvePlan() {
+      if (!state.runId) return;
+      // Check if user edited the plan in the textarea
+      const textarea = document.getElementById('plan-edit-area');
+      const editedPlan = textarea ? textarea.value : null;
+      socket.emit('run:approve-plan', {
+        runId: state.runId,
+        editedPlan: editedPlan !== state.planOutput ? editedPlan : null,
+      });
+    }
+
+    function replan() {
+      const input = document.getElementById('replan-input');
+      if (!input || !input.value.trim()) return;
+      state.planStreaming = '';
+      state.planOutput = '';
+      socket.emit('run:replan', {
+        runId: state.runId,
+        feedback: input.value.trim(),
+      });
+      state.showReplanInput = false;
+      render();
+    }
+
+    function stopRun() {
+      if (!state.runId) return;
+      fetch(`/api/runs/${state.runId}/stop`, { method: 'POST' });
+    }
+
+    function sendResponse(text) {
+      if (!state.runId) return;
+      fetch(`/api/runs/${state.runId}/respond`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response: text }),
+      });
+    }
+
+    function sendChat(message) {
+      if (!state.runId || !message.trim()) return;
+      fetch(`/api/runs/${state.runId}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: message.trim(), model: state.generateModel }),
+      });
+    }
+
+    // =========================================================================
+    // Rendering
+    // =========================================================================
+    function render() {
+      const app = document.getElementById('app');
+      app.innerHTML = renderHeader() + renderContent();
+      attachEvents();
+    }
+
+    function renderHeader() {
+      const statusLabels = {
+        planning: 'Planning…',
+        'plan-review': 'Review Plan',
+        generating: 'Generating Script…',
+        running: 'Running',
+        chatting: 'Chatting…',
+        completed: 'Completed',
+        failed: 'Failed',
+        stopped: 'Stopped',
+        error: 'Error',
+      };
+      const statusLabel = statusLabels[state.runStatus] || 'Ready';
+
+      return `
+        <div class="header">
+          <div class="header-left">
+            <div class="logo">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                <path d="M2 17l10 5 10-5"/>
+                <path d="M2 12l10 5 10-5"/>
+              </svg>
+              Qodo Agent Team
+            </div>
+            ${state.view === 'run' ? `
+              <div class="header-status">
+                <span class="status-dot ${state.runStatus || ''}"></span>
+                <span>${statusLabel}</span>
+                ${state.runId ? `<span style="color:var(--text-muted)">· ${state.runId}</span>` : ''}
+              </div>
+            ` : ''}
+          </div>
+          <div class="header-right">
+            ${state.view === 'run' ? `
+              ${['running','generating','planning','chatting'].includes(state.runStatus) ? `
+                <button class="btn btn-danger btn-sm" onclick="stopRun()">⏹ Stop</button>
+              ` : ''}
+              <button class="btn btn-sm" onclick="newRun()">+ New Run</button>
+            ` : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderContent() {
+      if (state.view === 'setup') return renderSetup();
+      return renderRunView();
+    }
+
+    function renderSetup() {
+      const grouped = groupModels(state.models);
+      return `
+        <div class="main-content">
+          <div class="setup-panel">
+            <div class="setup-card">
+              <h2>New Agent Team Run</h2>
+              <p class="subtitle">Describe your task. A planner agent will analyze it, then a generator will create and execute a coordinated multi-agent script.</p>
+
+              <div class="form-group">
+                <label>Project Folder</label>
+                <div class="folder-selector">
+                  <input type="text" class="folder-input" id="folder-input"
+                    value="${escapeHtml(state.projectPath)}"
+                    placeholder="/path/to/your/project" />
+                  <button class="btn" onclick="openFolderBrowser()">Browse</button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Models</label>
+                <div class="model-row">
+                  <div class="model-group">
+                    <label style="font-size:11px;text-transform:none;letter-spacing:0;font-weight:500">Plan Model</label>
+                    ${renderModelSelect('plan-model-select', state.planModel, grouped)}
+                    <div class="hint">Used for --plan stage (task analysis)</div>
+                  </div>
+                  <div class="model-group">
+                    <label style="font-size:11px;text-transform:none;letter-spacing:0;font-weight:500">Generate Model</label>
+                    ${renderModelSelect('gen-model-select', state.generateModel, grouped)}
+                    <div class="hint">Used for script generation &amp; in-script agents</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Task Prompt</label>
+                <textarea class="prompt-textarea" id="prompt-input"
+                  placeholder="Describe what you want the agent team to accomplish...&#10;&#10;Example: Refactor the authentication system to use JWT tokens instead of session cookies. Update all API routes, middleware, and the login/signup UI components."
+                >${escapeHtml(state.prompt)}</textarea>
+              </div>
+
+              <div class="form-actions">
+                <button class="btn btn-primary" id="start-btn"
+                  ${!state.projectPath || !state.prompt ? 'disabled' : ''}>
+                  🚀 Plan &amp; Launch
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        ${state.showFolderBrowser ? renderFolderBrowser() : ''}
+      `;
+    }
+
+    function renderModelSelect(id, selected, grouped) {
+      let html = `<select class="model-select" id="${id}">`;
+      for (const [provider, models] of Object.entries(grouped)) {
+        html += `<optgroup label="${escapeHtml(provider)}">`;
+        for (const m of models) {
+          const sel = m.id === selected ? ' selected' : '';
+          html += `<option value="${escapeHtml(m.id)}"${sel}>${escapeHtml(m.label)}</option>`;
+        }
+        html += `</optgroup>`;
+      }
+      html += `</select>`;
+      return html;
+    }
+
+    function groupModels(models) {
+      const groups = {};
+      for (const m of models) {
+        if (!groups[m.provider]) groups[m.provider] = [];
+        groups[m.provider].push(m);
+      }
+      return groups;
+    }
+
+    function renderFolderBrowser() {
+      return `
+        <div class="modal-overlay" onclick="closeFolderBrowser(event)">
+          <div class="modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+              <h3>Select Project Folder</h3>
+              <button class="btn btn-sm" onclick="closeFolderBrowser()">✕</button>
+            </div>
+            <div class="modal-current-path">📁 ${escapeHtml(state.browserPath)}</div>
+            <div class="modal-body">
+              ${state.browserParent !== state.browserPath ? `
+                <div class="folder-item" onclick="browseFolders('${escapeAttr(state.browserParent)}')">
+                  <span class="icon">⬆</span><span>..</span>
+                </div>
+              ` : ''}
+              ${state.browserDirs.map(d => `
+                <div class="folder-item" ondblclick="browseFolders('${escapeAttr(d.path)}')"
+                     onclick="selectBrowserFolder('${escapeAttr(d.path)}')">
+                  <span class="icon">📁</span><span>${escapeHtml(d.name)}</span>
+                </div>
+              `).join('')}
+              ${state.browserDirs.length === 0 ? `
+                <div style="padding:20px;text-align:center;color:var(--text-muted)">No subdirectories</div>
+              ` : ''}
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-sm" onclick="closeFolderBrowser()">Cancel</button>
+              <button class="btn btn-primary btn-sm" onclick="confirmFolder()">Select This Folder</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderRunView() {
+      const phaseIds = Object.keys(state.phases);
+      const hasPhases = phaseIds.length > 0;
+
+      // Determine step states for stepper
+      const planDone = ['plan-review','generating','running','completed','failed','chatting'].includes(state.runStatus);
+      const genDone = ['running','completed','failed','chatting'].includes(state.runStatus);
+      const execDone = ['completed','failed'].includes(state.runStatus);
+      const planActive = state.runStatus === 'planning';
+      const reviewActive = state.runStatus === 'plan-review';
+      const genActive = state.runStatus === 'generating';
+      const execActive = state.runStatus === 'running' || state.runStatus === 'chatting';
+      const isError = state.runStatus === 'error' || state.runStatus === 'stopped';
+
+      return `
+        <div class="main-content">
+          <div class="run-view">
+            <div class="prompt-display">
+              <strong>Prompt:</strong>${escapeHtml(state.prompt)}
+            </div>
+
+            <!-- Stepper -->
+            <div class="stepper">
+              <div class="step ${planDone ? 'done' : planActive ? 'active' : isError && !planDone ? 'error' : ''}">
+                <span class="step-num">${planDone ? '✓' : '1'}</span>
+                <span>Plan</span>
+              </div>
+              <div class="step-connector ${planDone ? 'done' : ''}"></div>
+              <div class="step ${reviewActive ? 'active' : planDone && !reviewActive ? 'done' : ''}">
+                <span class="step-num">${planDone && !reviewActive ? '✓' : '2'}</span>
+                <span>Review</span>
+              </div>
+              <div class="step-connector ${genDone ? 'done' : ''}"></div>
+              <div class="step ${genDone ? 'done' : genActive ? 'active' : ''}">
+                <span class="step-num">${genDone ? '✓' : '3'}</span>
+                <span>Generate</span>
+              </div>
+              <div class="step-connector ${execDone ? 'done' : ''}"></div>
+              <div class="step ${execDone ? (state.runStatus === 'completed' ? 'done' : 'error') : execActive ? 'active' : ''}">
+                <span class="step-num">${execDone ? (state.runStatus === 'completed' ? '✓' : '✗') : '4'}</span>
+                <span>Execute</span>
+              </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="tab-bar">
+              <div class="tab ${state.activeTab === 'main' ? 'active' : ''}" onclick="switchTab('main')">
+                📋 Main Output
+              </div>
+              ${state.planOutput || state.planStreaming ? `
+                <div class="tab ${state.activeTab === 'plan' ? 'active' : ''}" onclick="switchTab('plan')">
+                  🧠 Plan
+                </div>
+              ` : ''}
+              ${state.scriptContent ? `
+                <div class="tab ${state.activeTab === 'script' ? 'active' : ''}" onclick="switchTab('script')">
+                  📄 Script
+                </div>
+              ` : ''}
+              ${hasPhases ? `
+                <div class="tab ${state.activeTab === 'parallel' ? 'active' : ''}" onclick="switchTab('parallel')">
+                  ⊞ All Phases
+                </div>
+              ` : ''}
+              ${phaseIds.map(id => {
+                const phase = state.phases[id];
+                return `
+                  <div class="tab ${state.activeTab === id ? 'active' : ''}" onclick="switchTab('${id}')">
+                    <span class="phase-status ${phase.status || 'running'}"></span>
+                    ${escapeHtml(phase.label || id)}
+                  </div>
+                `;
+              }).join('')}
+            </div>
+
+            <!-- Tab content -->
+            ${renderTabContent()}
+
+            <!-- Bottom bar: context-dependent -->
+            ${renderBottomBar()}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderTabContent() {
+      if (state.activeTab === 'plan') {
+        return renderPlanTab();
+      }
+
+      if (state.activeTab === 'main') {
+        return `<div class="output-area"><div class="terminal" id="terminal">${colorize(state.mainOutput)}</div></div>`;
+      }
+
+      if (state.activeTab === 'script') {
+        return `<div class="output-area"><div class="script-preview" id="terminal">${escapeHtml(state.scriptContent)}</div></div>`;
+      }
+
+      if (state.activeTab === 'parallel') {
+        const phaseIds = Object.keys(state.phases);
+        if (phaseIds.length === 0) {
+          return `<div class="output-area"><div class="empty-state"><div class="icon">📋</div><div>No phase outputs yet</div></div></div>`;
+        }
+        return `
+          <div class="parallel-view">
+            ${phaseIds.map(id => {
+              const phase = state.phases[id];
+              return `
+                <div class="parallel-pane">
+                  <div class="parallel-pane-header">
+                    <span>${escapeHtml(phase.label || id)}</span>
+                    <div class="pane-status">
+                      ${phase.model ? `<span style="color:var(--text-muted);font-weight:400">${escapeHtml(phase.model)}</span>` : ''}
+                      <span class="phase-status ${phase.status || 'running'}"></span>
+                    </div>
+                  </div>
+                  <div class="terminal" id="terminal-${id}">${colorize(phase.output || '')}</div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        `;
+      }
+
+      // Individual phase tab
+      const phase = state.phases[state.activeTab];
+      if (!phase) {
+        return `<div class="output-area"><div class="empty-state"><div class="icon">⏳</div><div>Waiting for output...</div></div></div>`;
+      }
+      return `<div class="output-area"><div class="terminal" id="terminal">${colorize(phase.output || '')}</div></div>`;
+    }
+
+    function renderPlanTab() {
+      const content = state.planOutput || state.planStreaming || '';
+      const isReviewing = state.runStatus === 'plan-review';
+      const isPlanning = state.runStatus === 'planning';
+
+      if (isPlanning) {
+        return `
+          <div class="plan-review-area">
+            <div class="plan-content" id="plan-display">
+              ${content ? renderMarkdown(content) : '<div class="empty-state"><div class="spinner"></div><div style="margin-top:12px">Generating plan...</div></div>'}
+            </div>
+          </div>
+        `;
+      }
+
+      if (isReviewing) {
+        return `
+          <div class="plan-review-area">
+            <div class="plan-content" id="plan-display">${renderMarkdown(content)}</div>
+            ${state.showReplanInput ? `
+              <div class="replan-bar">
+                <input type="text" id="replan-input" placeholder="Describe what to change in the plan..."
+                       onkeydown="if(event.key==='Enter')replan()" />
+                <button class="btn btn-purple btn-sm" onclick="replan()">Re-plan</button>
+                <button class="btn btn-sm" onclick="toggleReplan()">Cancel</button>
+              </div>
+            ` : ''}
+            <div class="plan-actions">
+              <div class="plan-actions-left">
+                <button class="btn btn-sm" onclick="toggleReplan()">🔄 Request Changes</button>
+                <button class="btn btn-sm" onclick="editPlan()">✏️ Edit Plan</button>
+              </div>
+              <div class="plan-actions-right">
+                <button class="btn btn-success" onclick="approvePlan()">✅ Approve &amp; Generate Script</button>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      // Plan is done (post-review), just show it
+      return `
+        <div class="plan-review-area">
+          <div class="plan-content" id="plan-display">${renderMarkdown(content)}</div>
+        </div>
+      `;
+    }
+
+    function renderBottomBar() {
+      // During running: show respond bar
+      if (state.runStatus === 'running') {
+        return `
+          <div class="respond-bar">
+            <input type="text" id="respond-input" placeholder="Send input to script (for prompts/checkpoints)..."
+                   onkeydown="if(event.key==='Enter')sendResponseFromInput()" />
+            <button class="btn btn-sm" onclick="sendResponseFromInput()">Send</button>
+          </div>
+        `;
+      }
+
+      // After completion/failure: show chat bar for follow-up
+      if (['completed','failed'].includes(state.runStatus) && state.activeTab === 'main') {
+        return `
+          <div class="respond-bar">
+            <input type="text" id="chat-input" placeholder="Send a follow-up message (continues the session)..."
+                   onkeydown="if(event.key==='Enter')sendChatFromInput()" />
+            <button class="btn btn-sm" onclick="sendChatFromInput()">💬 Chat</button>
+          </div>
+        `;
+      }
+
+      // During chatting
+      if (state.runStatus === 'chatting' && state.activeTab === 'main') {
+        return `
+          <div class="respond-bar">
+            <input type="text" id="respond-input" placeholder="Waiting for response..." disabled />
+            <span class="spinner" style="margin:0 8px"></span>
+          </div>
+        `;
+      }
+
+      return '';
+    }
+
+    function renderPlanContent() {
+      const el = document.getElementById('plan-display');
+      if (el) {
+        const content = state.planOutput || state.planStreaming || '';
+        el.innerHTML = renderMarkdown(content);
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+
+    function renderTerminal() {
+      const terminals = document.querySelectorAll('.terminal');
+      terminals.forEach(t => {
+        const id = t.id;
+        if (id === 'terminal') {
+          if (state.activeTab === 'main') {
+            t.innerHTML = colorize(state.mainOutput);
+          } else if (state.phases[state.activeTab]) {
+            t.innerHTML = colorize(state.phases[state.activeTab].output || '');
+          }
+        } else if (id.startsWith('terminal-')) {
+          const phaseId = id.replace('terminal-', '');
+          if (state.phases[phaseId]) {
+            t.innerHTML = colorize(state.phases[phaseId].output || '');
+          }
+        }
+        t.scrollTop = t.scrollHeight;
+      });
+    }
+
+    // =========================================================================
+    // Simple markdown renderer
+    // =========================================================================
+    function renderMarkdown(text) {
+      if (!text) return '';
+      let html = escapeHtml(text);
+
+      // Code blocks
+      html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+        return `<pre><code>${code}</code></pre>`;
+      });
+
+      // Inline code
+      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+      // Headers
+      html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+      // Bold
+      html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+      // Italic
+      html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+      // Blockquotes
+      html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+
+      // Unordered lists
+      html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
+      html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+
+      // Ordered lists
+      html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+
+      // Tables (basic)
+      html = html.replace(/^\|(.+)\|$/gm, (match, content) => {
+        const cells = content.split('|').map(c => c.trim());
+        if (cells.every(c => /^[-:]+$/.test(c))) return ''; // separator row
+        const tag = 'td';
+        return '<tr>' + cells.map(c => `<${tag}>${c}</${tag}>`).join('') + '</tr>';
+      });
+      html = html.replace(/(<tr>.*<\/tr>\n?)+/g, '<table>$&</table>');
+
+      // Paragraphs (lines not already wrapped)
+      html = html.replace(/^(?!<[hupoltb]|$)(.+)$/gm, '<p>$1</p>');
+
+      // Clean up empty paragraphs
+      html = html.replace(/<p><\/p>/g, '');
+
+      return html;
+    }
+
+    // =========================================================================
+    // Terminal colorization
+    // =========================================================================
+    function colorize(text) {
+      if (!text) return '';
+      let html = escapeHtml(text);
+
+      html = html.replace(/\[(\d{2}:\d{2}:\d{2})\]/g, '<span class="t-muted">[$1]</span>');
+      html = html.replace(/(✅.*)/g, '<span class="t-green">$1</span>');
+      html = html.replace(/(❌.*)/g, '<span class="t-red">$1</span>');
+      html = html.replace(/(⏭️.*)/g, '<span class="t-muted">$1</span>');
+      html = html.replace(/(🔵.*)/g, '<span class="t-blue">$1</span>');
+      html = html.replace(/(═{3,}.*═{3,})/g, '<span class="t-purple t-bold">$1</span>');
+      html = html.replace(/(PHASE\s+\d+\s*\[[^\]]+\]:.*)/g, '<span class="t-purple t-bold">$1</span>');
+      html = html.replace(/(━{3,})/g, '<span class="t-yellow">$1</span>');
+      html = html.replace(/(CHECKPOINT:.*)/g, '<span class="t-yellow t-bold">$1</span>');
+      html = html.replace(/\[(Opus|Sonnet)\]/g, '<span class="t-blue">[$1]</span>');
+      html = html.replace(/(\[Stage \d+\/\d+:.*?\])/g, '<span class="t-purple t-bold">$1</span>');
+      html = html.replace(/(\[Generating.*?\])/g, '<span class="t-yellow">$1</span>');
+      html = html.replace(/(\[Plan generated.*?\])/g, '<span class="t-green">$1</span>');
+      html = html.replace(/(\[Script generated.*?\])/g, '<span class="t-green">$1</span>');
+      html = html.replace(/(\[Script length.*?\])/g, '<span class="t-muted">$1</span>');
+      html = html.replace(/(\[Executing.*?\])/g, '<span class="t-blue">$1</span>');
+      html = html.replace(/(\[Script completed.*?\])/g, '<span class="t-green">$1</span>');
+      html = html.replace(/(\[Script failed.*?\])/g, '<span class="t-red">$1</span>');
+      html = html.replace(/(\[Re-planning.*?\])/g, '<span class="t-purple">$1</span>');
+      html = html.replace(/(\[Waiting.*?\])/g, '<span class="t-muted">$1</span>');
+      html = html.replace(/(━━━ Follow-up Chat ━━━)/g, '<span class="t-blue t-bold">$1</span>');
+
+      return html;
+    }
+
+    // =========================================================================
+    // Event handlers
+    // =========================================================================
+    function attachEvents() {
+      const folderInput = document.getElementById('folder-input');
+      if (folderInput) {
+        folderInput.addEventListener('input', e => {
+          state.projectPath = e.target.value;
+          updateStartButton();
+        });
+      }
+
+      const promptInput = document.getElementById('prompt-input');
+      if (promptInput) {
+        promptInput.addEventListener('input', e => {
+          state.prompt = e.target.value;
+          updateStartButton();
+        });
+      }
+
+      const planModelSelect = document.getElementById('plan-model-select');
+      if (planModelSelect) {
+        planModelSelect.addEventListener('change', e => {
+          state.planModel = e.target.value;
+        });
+      }
+
+      const genModelSelect = document.getElementById('gen-model-select');
+      if (genModelSelect) {
+        genModelSelect.addEventListener('change', e => {
+          state.generateModel = e.target.value;
+        });
+      }
+
+      const startBtn = document.getElementById('start-btn');
+      if (startBtn) {
+        startBtn.addEventListener('click', startRun);
+      }
+
+      // Auto-scroll terminals
+      document.querySelectorAll('.terminal').forEach(t => {
+        t.scrollTop = t.scrollHeight;
+      });
+    }
+
+    function updateStartButton() {
+      const btn = document.getElementById('start-btn');
+      if (btn) btn.disabled = !state.projectPath || !state.prompt;
+    }
+
+    function switchTab(tab) {
+      state.activeTab = tab;
+      render();
+    }
+
+    function newRun() {
+      state.view = 'setup';
+      state.runId = null;
+      state.runStatus = null;
+      state.mainOutput = '';
+      state.planOutput = '';
+      state.planStreaming = '';
+      state.phases = {};
+      state.scriptContent = '';
+      state.generationOutput = '';
+      state.activeTab = 'main';
+      state.showReplanInput = false;
+      render();
+    }
+
+    function openFolderBrowser() {
+      state.showFolderBrowser = true;
+      browseFolders(state.projectPath || '');
+    }
+
+    function closeFolderBrowser(event) {
+      if (event && event.target !== event.currentTarget) return;
+      state.showFolderBrowser = false;
+      render();
+    }
+
+    function selectBrowserFolder(p) {
+      state.browserPath = p;
+      render();
+    }
+
+    function confirmFolder() {
+      state.projectPath = state.browserPath;
+      state.showFolderBrowser = false;
+      render();
+    }
+
+    function toggleReplan() {
+      state.showReplanInput = !state.showReplanInput;
+      render();
+      if (state.showReplanInput) {
+        const input = document.getElementById('replan-input');
+        if (input) input.focus();
+      }
+    }
+
+    function editPlan() {
+      // Switch to an editable textarea view of the plan
+      const planDisplay = document.getElementById('plan-display');
+      if (!planDisplay) return;
+      const raw = state.planOutput || state.planStreaming || '';
+      planDisplay.innerHTML = `<textarea id="plan-edit-area" class="plan-edit-textarea" style="width:100%;height:100%;min-height:400px;resize:none;font-size:13px;line-height:1.6">${escapeHtml(raw)}</textarea>`;
+    }
+
+    function sendResponseFromInput() {
+      const input = document.getElementById('respond-input');
+      if (input && input.value) {
+        sendResponse(input.value);
+        state.mainOutput += `> ${input.value}\n`;
+        input.value = '';
+        renderTerminal();
+      }
+    }
+
+    function sendChatFromInput() {
+      const input = document.getElementById('chat-input');
+      if (input && input.value.trim()) {
+        sendChat(input.value);
+        input.value = '';
+      }
+    }
+
+    // =========================================================================
+    // Utilities
+    // =========================================================================
+    function escapeHtml(str) {
+      if (!str) return '';
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+    }
+
+    function escapeAttr(str) {
+      return str.replace(/'/g, "\\'").replace(/"/g, '\\"');
+    }
+
+    // =========================================================================
+    // Init
+    // =========================================================================
+    async function init() {
+      await loadModels();
+      connectSocket();
+      render();
+    }
+    init();
+  </script>
+</body>
+</html>
