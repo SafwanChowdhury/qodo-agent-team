@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
-import { Layers, Square, Plus } from 'lucide-react';
+import { Square, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { BrandMark } from '@/components/BrandMark';
 import { useRunStore } from '@/store/runStore';
 import type { RunStatus } from '@/types';
 
@@ -52,15 +53,18 @@ export function Header() {
   }
 
   return (
-    <header className="flex items-center justify-between h-12 px-5 border-b border-[#D4C5B0] bg-white shrink-0">
+    <header className="flex items-center justify-between h-14 px-6 border-b border-[#E6DCCB] bg-[#F9F6F1]/80 backdrop-blur-md shrink-0">
       {/* Logo */}
-      <div className="flex items-center gap-2.5">
-        <div className="flex items-center justify-center h-7 w-7 rounded-md bg-[#5C1A1A]">
-          <Layers className="h-4 w-4 text-[#F9F6F1]" />
+      <div className="flex items-center gap-3">
+        <BrandMark size={22} className="text-[#5C1A1A]" />
+        <div className="flex items-baseline gap-1.5 leading-none">
+          <span className="font-display text-[17px] font-medium text-[#2C1810]">
+            Qodo
+          </span>
+          <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-[#A08570]">
+            Agent Team
+          </span>
         </div>
-        <span className="text-sm font-semibold text-[#2C1810] tracking-tight">
-          Qodo Agent Team
-        </span>
       </div>
 
       {/* Status + Run ID */}

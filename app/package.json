@@ -4,10 +4,12 @@
   "description": "Web-based GUI for orchestrating Qodo Agent Team scripts",
   "private": true,
   "scripts": {
+    "install:all": "npm install && cd frontend && npm install",
     "dev": "concurrently -k -n server,vite -c blue,magenta \"node server.js\" \"cd frontend && npm run dev\"",
     "start": "node server.js",
     "server": "node server.js",
-    "build": "cd frontend && npm run build"
+    "build": "cd frontend && npm run build",
+    "setup": "npm run install:all && npm run build"
   },
   "dependencies": {
     "chokidar": "^3.6.0",

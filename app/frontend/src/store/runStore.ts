@@ -82,6 +82,7 @@ export const useRunStore = create<RunStore>((set) => ({
             status: phaseUpdate.status ?? 'running',
             model: phaseUpdate.model,
             output: phaseUpdate.output ?? '',
+            summary: phaseUpdate.summary,
           };
       return {
         phases: { ...state.phases, [phaseId]: updated },

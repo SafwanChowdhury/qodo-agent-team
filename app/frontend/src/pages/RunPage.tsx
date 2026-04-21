@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronDown, ChevronUp, RotateCcw, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { socket, emitApproveScript, emitRejectScript } from '@/lib/socket';
+import { socket, emitApproveScript, emitRejectScript, emitRerunScript } from '@/lib/socket';
 import { useRunStore } from '@/store/runStore';
 import { Stepper } from '@/components/Stepper';
 import { Terminal } from '@/components/Terminal';
@@ -10,6 +10,8 @@ import { ParallelView } from '@/components/ParallelView';
 import { ScriptVisualizer } from '@/components/ScriptVisualizer';
 import { RespondBar, type RespondMode } from '@/components/RespondBar';
 import { PlanTab } from '@/components/PlanTab';
+import { SummaryPage } from '@/components/SummaryPage';
+import { Button } from '@/components/ui/button';
 import type { RunStatus, Phase } from '@/types';
 
 type BuiltinTabId = 'main' | 'plan' | 'script' | 'parallel';
@@ -118,10 +120,67 @@ function PromptBar({ prompt }: PromptBarProps) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// FailedRunBar — shown when execution fails/stops, allows re-running run.sh
+// ---------------------------------------------------------------------------
+interface FailedRunBarProps {
+  status: RunStatus;
+  scriptPath: string;
+  onRerun: () => void;
+}
+
+function FailedRunBar({ status, scriptPath, onRerun }: FailedRunBarProps) {
+  const statusLabel =
+    status === 'failed' ? 'failed' : status === 'stopped' ? 'was stopped' : 'encountered an error';
+
+  const bgColor =
+    status === 'failed'
+      ? 'bg-[#B71C1C]/5 border-[#B71C1C]/30'
+      : status === 'stopped'
+      ? 'bg-[#8B6914]/5 border-[#8B6914]/30'
+      : 'bg-[#B71C1C]/5 border-[#B71C1C]/30';
+
+  const iconColor =
+    status === 'failed' ? 'text-[#B71C1C]' : status === 'stopped' ? 'text-[#8B6914]' : 'text-[#B71C1C]';
+
+  return (
+    <div className={cn('shrink-0 border-t px-4 py-3', bgColor)}>
+      <div className="flex items-center gap-3">
+        <AlertTriangle className={cn('h-4 w-4 shrink-0', iconColor)} />
+
+        <div className="flex-1 min-w-0">
+          <p className="text-sm text-[#2C1810]">
+            Script execution {statusLabel}.
+          </p>
+          <p className="text-xs text-[#7A5C4A] mt-0.5">
+            You can edit <code className="font-mono text-[10px] bg-[#F3EDE3] px-1 py-0.5 rounded">{scriptPath}</code> on
+            disk and re-run, or re-run as-is to retry (skip checks will resume from where it left off).
+          </p>
+        </div>
+
+        <Button
+          size="sm"
+          variant="default"
+          onClick={onRerun}
+          className="gap-1.5 shrink-0"
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          Re-run Script
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function RunPage() {
   const { runId: routeRunId } = useParams<{ runId: string }>();
   const navigate = useNavigate();
   const notFoundTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Track whether to show the summary view
+  const [showSummary, setShowSummary] = useState(false);
+  // Track the previous status to detect transitions to terminal states
+  const prevStatusRef = useRef<RunStatus | null>(null);
 
   const runId = useRunStore((s) => s.runId);
   const runStatus = useRunStore((s) => s.runStatus);
@@ -168,6 +227,30 @@ export default function RunPage() {
     }
   }, [runStatus]);
 
+  // Auto-show summary when execution transitions to a terminal state
+  const TERMINAL_STATUSES: RunStatus[] = ['completed', 'failed', 'stopped', 'error'];
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = runStatus;
+
+    if (
+      runStatus &&
+      TERMINAL_STATUSES.includes(runStatus) &&
+      prev !== null &&
+      !TERMINAL_STATUSES.includes(prev)
+    ) {
+      // Small delay to let final phase data flush in
+      const timer = setTimeout(() => setShowSummary(true), 1500);
+      return () => clearTimeout(timer);
+    }
+
+    // If the run restarts (e.g. re-run), hide the summary
+    if (runStatus && !TERMINAL_STATUSES.includes(runStatus)) {
+      setShowSummary(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runStatus]);
+
   const isScriptReview = runStatus === 'script-review';
 
   const handleApproveScript = useCallback(() => {
@@ -184,6 +267,12 @@ export default function RunPage() {
     },
     [routeRunId, runId]
   );
+
+  const handleRerunScript = useCallback(() => {
+    if (routeRunId || runId) {
+      emitRerunScript((routeRunId || runId)!);
+    }
+  }, [routeRunId, runId]);
 
   // Build execution phase status map for the visualizer
   const executionPhaseStatus = Object.entries(phases).reduce(
@@ -214,6 +303,8 @@ export default function RunPage() {
 
   const validTabIds = new Set(tabs.map((t) => t.id));
   const currentTab = validTabIds.has(activeTab) ? activeTab : 'main';
+
+  const canRerun = scriptContent && (runStatus === 'failed' || runStatus === 'stopped' || runStatus === 'error');
 
   const respondMode = deriveRespondMode(runStatus);
 
@@ -263,16 +354,70 @@ export default function RunPage() {
     }
   }
 
+  const isTerminal = runStatus && (['completed', 'failed', 'stopped', 'error'] as RunStatus[]).includes(runStatus);
+
+  // Handler to dismiss summary and go back to the log/tab view
+  const handleBackToRun = useCallback(() => {
+    setShowSummary(false);
+  }, []);
+
+  // Handler to start a new run
+  const handleNewRun = useCallback(() => {
+    useRunStore.getState().resetRun();
+    navigate('/');
+  }, [navigate]);
+
+  // Handler for re-run from summary page
+  const handleSummaryRerun = useCallback(() => {
+    setShowSummary(false);
+    handleRerunScript();
+  }, [handleRerunScript]);
+
+  // Show summary page when execution is complete and showSummary is true
+  if (showSummary && isTerminal) {
+    return (
+      <div className="flex flex-col flex-1 overflow-hidden bg-[#F9F6F1]">
+        <Stepper runStatus={runStatus} />
+        <SummaryPage
+          runStatus={runStatus!}
+          prompt={prompt}
+          phases={phases}
+          planOutput={planOutput}
+          scriptContent={scriptContent}
+          mainOutput={mainOutput}
+          onBackToRun={handleBackToRun}
+          onNewRun={handleNewRun}
+          onRerun={canRerun ? handleSummaryRerun : undefined}
+          className="flex-1"
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-[#F9F6F1]">
       <PromptBar prompt={prompt} />
       <Stepper runStatus={runStatus} />
+
+      {/* Summary toggle button — shown when execution is done but user dismissed summary */}
+      {isTerminal && !showSummary && (
+        <div className="flex items-center justify-center px-4 py-1.5 bg-[#F3EDE3] border-b border-[#D4C5B0] shrink-0">
+          <button
+            onClick={() => setShowSummary(true)}
+            className="text-xs font-medium text-[#5C1A1A] hover:text-[#2C1810] hover:underline transition-colors"
+          >
+            📊 View Execution Summary
+          </button>
+        </div>
+      )}
+
       <TabBar tabs={tabs} activeTab={currentTab} onTabChange={setActiveTab} />
 
       <div className="flex flex-col flex-1 overflow-hidden">
         {renderTabContent()}
       </div>
 
+      {canRerun && <FailedRunBar status={runStatus!} scriptPath={scriptContent ? `run.sh` : ''} onRerun={handleRerunScript} />}
       <RespondBar mode={respondMode} runId={routeRunId ?? runId} />
     </div>
   );

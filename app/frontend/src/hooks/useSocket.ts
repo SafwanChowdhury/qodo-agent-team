@@ -110,6 +110,7 @@ export function useSocket() {
         status: payload.status,
         model: payload.model,
         output: payload.output ?? store().phases[payload.phaseId]?.output ?? '',
+        ...(payload.summary !== undefined && { summary: payload.summary }),
       });
     }
 

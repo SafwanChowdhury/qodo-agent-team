@@ -5,7 +5,6 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { useRunStore } from '@/store/runStore';
@@ -166,8 +165,8 @@ export function FolderBrowser() {
         </div>
 
         {/* Footer */}
-        <DialogFooter className="px-5 py-4 border-t border-[#D4C5B0] bg-[#F9F6F1] flex flex-row items-center justify-between gap-3">
-          <p className="text-xs text-[#A08570] truncate flex-1 min-w-0">
+        <div className="px-5 py-4 border-t border-[#D4C5B0] bg-[#F9F6F1] flex flex-col gap-3">
+          <p className="text-xs text-[#A08570] truncate min-w-0">
             {selectedDir ? (
               <>
                 <span className="text-[#7A5C4A]">Selected: </span>
@@ -178,7 +177,7 @@ export function FolderBrowser() {
             )}
           </p>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center justify-end gap-2">
             <Button variant="outline" size="sm" onClick={handleClose}>
               Cancel
             </Button>
@@ -191,7 +190,7 @@ export function FolderBrowser() {
               Select This Folder
             </Button>
           </div>
-        </DialogFooter>
+        </div>
       </DialogContent>
     </Dialog>
   );

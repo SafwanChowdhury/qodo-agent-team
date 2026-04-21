@@ -70,7 +70,8 @@ const config: Config = {
       },
       fontFamily: {
         mono: ['SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'monospace'],
-        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Helvetica', 'Arial', 'sans-serif'],
+        sans: ['"Inter Tight"', 'Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Helvetica', 'Arial', 'sans-serif'],
+        display: ['Fraunces', 'ui-serif', 'Georgia', 'Cambria', 'Times New Roman', 'serif'],
       },
       keyframes: {
         pulse: {

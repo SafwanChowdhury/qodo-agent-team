@@ -21,6 +21,7 @@ export interface Phase {
   status: 'running' | 'completed' | 'failed' | 'skipped';
   model?: string;
   output: string;
+  summary?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +153,7 @@ export interface PhasePayload {
   status: 'running' | 'completed' | 'failed' | 'skipped';
   model?: string;
   output?: string;
+  summary?: string;
 }
 
 export interface PhaseOutputPayload {
@@ -161,6 +163,23 @@ export interface PhaseOutputPayload {
 
 export interface RunErrorPayload {
   error: string;
+}
+
+// ---------------------------------------------------------------------------
+// Previous run — as returned by GET /api/previous-runs
+// ---------------------------------------------------------------------------
+export interface PreviousRun {
+  id: string;
+  dirPath: string;
+  hasScript: boolean;
+  hasPlan: boolean;
+  logFiles: string[];
+  projectPath: string;
+  planSummary: string;
+  scriptSize: number;
+  isActive: boolean;
+  modifiedAt: string;
+  createdAt: string;
 }
 
 // ---------------------------------------------------------------------------

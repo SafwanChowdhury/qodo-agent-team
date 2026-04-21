@@ -1,6 +1,22 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FolderOpen, Rocket, Zap } from 'lucide-react';
+import {
+  FolderOpen,
+  Rocket,
+  Zap,
+  Clock,
+  FileCode,
+  FileText,
+  ScrollText,
+  Play,
+  Eye,
+  RefreshCw,
+  Loader2,
+  Trash2,
+  X,
+  History,
+  ChevronsRight,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -16,11 +32,362 @@ import {
 import { FolderBrowser } from '@/components/FolderBrowser';
 import { useRunStore } from '@/store/runStore';
 import { useModels } from '@/hooks/useModels';
-import { socket } from '@/lib/socket';
-import type { RunCreatedPayload } from '@/types';
+import { socket, emitRestoreRun } from '@/lib/socket';
+import { cn } from '@/lib/utils';
+import type { RunCreatedPayload, PreviousRun } from '@/types';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function formatRelativeTime(dateStr: string): string {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString();
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ---------------------------------------------------------------------------
+// Drawer Run Item
+// ---------------------------------------------------------------------------
+
+interface DrawerRunItemProps {
+  run: PreviousRun;
+  onReview: (runId: string) => void;
+  onExecute: (runId: string) => void;
+  onDelete: (runId: string) => void;
+  deleting: boolean;
+}
+
+function DrawerRunItem({ run, onReview, onExecute, onDelete, deleting }: DrawerRunItemProps) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const projectName = run.projectPath
+    ? run.projectPath.split('/').filter(Boolean).pop() || run.projectPath
+    : null;
+
+  return (
+    <div
+      className={cn(
+        'rounded-lg border transition-all duration-150',
+        run.isActive
+          ? 'border-[#2D6A2D]/40 bg-[#2D6A2D]/[0.03]'
+          : 'border-[#E6DCCB] bg-white hover:border-[#C9B99A] hover:shadow-sm'
+      )}
+    >
+      <div className="px-3 py-2.5">
+        {/* Header: ID + time + delete */}
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <code className="text-[10px] font-mono font-bold text-[#5C1A1A] bg-[#5C1A1A]/[0.06] px-1 py-0.5 rounded shrink-0">
+              {run.id}
+            </code>
+            {run.isActive && (
+              <span className="text-[9px] font-semibold text-[#2D6A2D] bg-[#2D6A2D]/10 px-1 py-0.5 rounded uppercase tracking-wider shrink-0">
+                Active
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <span className="text-[10px] text-[#A08570]">
+              {formatRelativeTime(run.modifiedAt)}
+            </span>
+            {!confirmDelete ? (
+              <button
+                onClick={() => setConfirmDelete(true)}
+                className="p-0.5 rounded text-[#A08570] hover:text-[#B71C1C] hover:bg-[#B71C1C]/10 transition-colors"
+                title="Delete run"
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            ) : (
+              <div className="flex items-center gap-0.5">
+                <button
+                  onClick={() => { onDelete(run.id); setConfirmDelete(false); }}
+                  disabled={deleting}
+                  className="px-1.5 py-0.5 rounded text-[10px] font-medium text-white bg-[#B71C1C] hover:bg-[#8B1515] transition-colors disabled:opacity-50"
+                >
+                  {deleting ? '…' : 'Delete'}
+                </button>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  className="p-0.5 rounded text-[#A08570] hover:text-[#2C1810] hover:bg-[#EDE5D8] transition-colors"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Project name */}
+        {projectName && (
+          <p className="text-xs font-medium text-[#2C1810] truncate" title={run.projectPath}>
+            {projectName}
+          </p>
+        )}
+
+        {/* Plan summary */}
+        {run.planSummary && (
+          <p className="text-[11px] text-[#7A5C4A] line-clamp-1 mt-0.5 leading-snug">
+            {run.planSummary}
+          </p>
+        )}
+
+        {/* Artifacts */}
+        <div className="flex items-center gap-2 mt-1.5 mb-2">
+          {run.hasScript && (
+            <span className="flex items-center gap-0.5 text-[10px] text-[#2D6A2D]">
+              <FileCode className="h-2.5 w-2.5" />
+              run.sh
+              {run.scriptSize > 0 && (
+                <span className="text-[#A08570]">({formatBytes(run.scriptSize)})</span>
+              )}
+            </span>
+          )}
+          {run.hasPlan && (
+            <span className="flex items-center gap-0.5 text-[10px] text-[#6B2D6B]">
+              <FileText className="h-2.5 w-2.5" />
+              plan
+            </span>
+          )}
+          {run.logFiles.length > 0 && (
+            <span className="flex items-center gap-0.5 text-[10px] text-[#8B6914]">
+              <ScrollText className="h-2.5 w-2.5" />
+              {run.logFiles.length}
+            </span>
+          )}
+        </div>
+
+        {/* Actions */}
+        <div className="flex items-center gap-1.5">
+          <Button
+            variant="outline"
+            size="sm"
+            className="flex-1 gap-1 text-[11px] h-7 px-2"
+            onClick={() => onReview(run.id)}
+          >
+            <Eye className="h-3 w-3" />
+            Review
+          </Button>
+          {run.hasScript && (
+            <Button
+              variant="default"
+              size="sm"
+              className="flex-1 gap-1 text-[11px] h-7 px-2"
+              onClick={() => onExecute(run.id)}
+            >
+              <Play className="h-3 w-3" />
+              Execute
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Previous Runs Drawer
+// ---------------------------------------------------------------------------
+
+interface PreviousRunsDrawerProps {
+  open: boolean;
+  onToggle: () => void;
+  onReview: (runId: string) => void;
+  onExecute: (runId: string) => void;
+}
+
+function PreviousRunsDrawer({ open, onToggle, onReview, onExecute }: PreviousRunsDrawerProps) {
+  const [runs, setRuns] = useState<PreviousRun[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const hasFetched = useRef(false);
+
+  const fetchRuns = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/previous-runs');
+      if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
+      const data = await res.json();
+      setRuns(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Fetch when drawer opens for the first time, and refresh on subsequent opens
+  useEffect(() => {
+    if (open) {
+      fetchRuns();
+      hasFetched.current = true;
+    }
+  }, [open, fetchRuns]);
+
+  const handleDelete = useCallback(async (runId: string) => {
+    setDeletingId(runId);
+    try {
+      const res = await fetch(`/api/previous-runs/${runId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Delete failed');
+      }
+      setRuns((prev) => prev.filter((r) => r.id !== runId));
+    } catch (err) {
+      // Could show a toast, but for now just log
+      console.error('Delete failed:', err);
+    } finally {
+      setDeletingId(null);
+    }
+  }, []);
+
+  return (
+    <>
+      {/* Backdrop */}
+      {open && (
+        <div
+          className="fixed inset-0 bg-black/20 backdrop-blur-[1px] z-40 transition-opacity duration-300"
+          onClick={onToggle}
+        />
+      )}
+
+      {/* Drawer panel */}
+      <div
+        className={cn(
+          'fixed top-0 left-0 h-full z-50 flex transition-transform duration-300 ease-out',
+          open ? 'translate-x-0' : '-translate-x-[340px]'
+        )}
+      >
+        {/* Drawer content */}
+        <div className="w-[340px] h-full bg-[#F9F6F1] border-r border-[#D4C5B0] shadow-[4px_0_24px_-8px_rgba(44,24,16,0.15)] flex flex-col">
+          {/* Drawer header */}
+          <div className="flex items-center justify-between px-4 py-3 border-b border-[#D4C5B0] bg-white shrink-0">
+            <div className="flex items-center gap-2">
+              <History className="h-4 w-4 text-[#5C1A1A]" />
+              <h2 className="text-sm font-semibold text-[#2C1810]">Previous Runs</h2>
+              {runs.length > 0 && (
+                <span className="text-[10px] text-[#A08570] bg-[#EDE5D8] px-1.5 py-0.5 rounded-full font-medium">
+                  {runs.length}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={fetchRuns}
+                disabled={loading}
+                className="p-1.5 rounded-md text-[#7A5C4A] hover:text-[#5C1A1A] hover:bg-[#F3EDE3] transition-colors disabled:opacity-50"
+                title="Refresh"
+              >
+                <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+              </button>
+              <button
+                onClick={onToggle}
+                className="p-1.5 rounded-md text-[#7A5C4A] hover:text-[#5C1A1A] hover:bg-[#F3EDE3] transition-colors"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Drawer body */}
+          <div className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
+            {loading && runs.length === 0 && (
+              <div className="flex flex-col items-center justify-center py-12 gap-2">
+                <Loader2 className="h-5 w-5 text-[#A08570] animate-spin" />
+                <span className="text-xs text-[#A08570]">Scanning /tmp…</span>
+              </div>
+            )}
+
+            {error && (
+              <div className="text-center py-8">
+                <p className="text-xs text-[#B71C1C] mb-2">{error}</p>
+                <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={fetchRuns}>
+                  <RefreshCw className="h-3 w-3" />
+                  Retry
+                </Button>
+              </div>
+            )}
+
+            {!loading && !error && runs.length === 0 && (
+              <div className="flex flex-col items-center justify-center py-12 gap-2 text-center">
+                <History className="h-8 w-8 text-[#D4C5B0]" />
+                <p className="text-sm text-[#A08570]">No previous runs found</p>
+                <p className="text-[11px] text-[#C9B99A]">
+                  Runs are stored in /tmp/qodo-team-*
+                </p>
+              </div>
+            )}
+
+            {runs.map((run) => (
+              <DrawerRunItem
+                key={run.id}
+                run={run}
+                onReview={onReview}
+                onExecute={onExecute}
+                onDelete={handleDelete}
+                deleting={deletingId === run.id}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Pull tab — always visible, attached to drawer edge */}
+        <button
+          onClick={onToggle}
+          className={cn(
+            'self-center -ml-px flex flex-col items-center justify-center gap-4',
+            'w-9 h-32 rounded-r-xl',
+            'bg-white border border-l-0 border-[#D4C5B0]',
+            'shadow-[2px_0_8px_-4px_rgba(44,24,16,0.12)]',
+            'text-[#7A5C4A] hover:text-[#5C1A1A] hover:bg-[#F9F3EC]',
+            'transition-colors duration-150',
+            'focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5C1A1A]'
+          )}
+          title={open ? 'Close previous runs' : 'View previous runs'}
+        >
+          <ChevronsRight
+            className={cn(
+              'h-4 w-4 shrink-0 transition-transform duration-300',
+              open ? 'rotate-180' : 'rotate-0'
+            )}
+          />
+          <span
+            className="text-[10px] font-semibold uppercase tracking-[0.1em] leading-none whitespace-nowrap"
+            style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}
+          >
+            Older Runs
+          </span>
+        </button>
+      </div>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SetupPage
+// ---------------------------------------------------------------------------
 
 export default function SetupPage() {
   const navigate = useNavigate();
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   const projectPath = useRunStore((s) => s.projectPath);
   const prompt = useRunStore((s) => s.prompt);
@@ -35,6 +402,7 @@ export default function SetupPage() {
   const setShowFolderBrowser = useRunStore((s) => s.setShowFolderBrowser);
   const setRunId = useRunStore((s) => s.setRunId);
   const setView = useRunStore((s) => s.setView);
+  const resetRun = useRunStore((s) => s.resetRun);
 
   const { groupedModels, loading: modelsLoading, error: modelsError } = useModels();
 
@@ -67,28 +435,56 @@ export default function SetupPage() {
     });
   }
 
+  const handleReviewRun = useCallback(
+    (runId: string) => {
+      resetRun();
+      setDrawerOpen(false);
+      emitRestoreRun(runId, false);
+    },
+    [resetRun]
+  );
+
+  const handleExecuteRun = useCallback(
+    (runId: string) => {
+      resetRun();
+      setDrawerOpen(false);
+      emitRestoreRun(runId, true);
+    },
+    [resetRun]
+  );
+
   const canSubmit = projectPath.trim().length > 0 && prompt.trim().length > 0;
   const providerNames = Object.keys(groupedModels).sort();
 
   return (
-    <div className="flex flex-col flex-1 overflow-y-auto bg-[#F9F6F1]">
-      <div className="flex flex-col items-center w-full px-4 py-12">
+    <div className="relative flex flex-col flex-1 overflow-y-auto bg-[#F9F6F1]">
+      {/* Subtle background grain / radial wash */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-[420px]"
+        style={{
+          background:
+            'radial-gradient(ellipse 60% 60% at 50% 0%, rgba(92,26,26,0.06), transparent 70%)',
+        }}
+      />
+
+      <div className="relative flex flex-col items-center w-full px-4 pt-10 pb-16">
 
         {/* Page heading */}
-        <div className="w-full max-w-2xl mb-8 text-center">
-          <div className="inline-flex items-center justify-center h-12 w-12 rounded-xl bg-[#5C1A1A] mb-4 shadow-sm">
-            <Rocket className="h-6 w-6 text-[#F9F6F1]" />
-          </div>
-          <h1 className="text-2xl font-bold text-[#2C1810] tracking-tight mb-2">
-            New Agent Team Run
+        <div className="w-full max-w-2xl mb-10 text-center">
+          <h1 className="font-display text-[44px] leading-[1.05] font-light text-[#2C1810] mb-4">
+            Put your <em className="italic font-normal text-[#5C1A1A]">agent team</em>
+            <br />
+            to work.
           </h1>
-          <p className="text-sm text-[#7A5C4A]">
-            Describe your task and configure the models — the agent team will plan, generate, and execute.
+          <p className="text-[15px] leading-relaxed text-[#7A5C4A] max-w-lg mx-auto">
+            Describe the task, pick the models, and the team will plan,
+            generate, and execute — end to end.
           </p>
         </div>
 
         {/* Card */}
-        <div className="w-full max-w-2xl rounded-xl border border-[#D4C5B0] bg-white shadow-sm overflow-hidden">
+        <div className="w-full max-w-2xl rounded-2xl border border-[#E6DCCB] bg-white/90 backdrop-blur-sm shadow-[0_1px_2px_rgba(44,24,16,0.04),0_12px_40px_-12px_rgba(44,24,16,0.12)] overflow-hidden">
 
           <form onSubmit={handleSubmit} className="divide-y divide-[#EDE5D8]">
 
@@ -300,10 +696,18 @@ export default function SetupPage() {
           </form>
         </div>
 
-        <p className="mt-6 text-xs text-[#A08570] text-center">
-          The agent team will plan your task, generate a script, and execute it step by step.
+        <p className="mt-8 text-[11px] uppercase tracking-[0.16em] text-[#A08570] text-center">
+          Plan · Generate · Execute
         </p>
       </div>
+
+      {/* Previous Runs Drawer */}
+      <PreviousRunsDrawer
+        open={drawerOpen}
+        onToggle={() => setDrawerOpen((o) => !o)}
+        onReview={handleReviewRun}
+        onExecute={handleExecuteRun}
+      />
 
       <FolderBrowser />
     </div>

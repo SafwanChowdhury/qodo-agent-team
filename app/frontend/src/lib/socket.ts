@@ -46,6 +46,8 @@ interface ClientToServerEvents {
   'run:approve-plan': (data: { runId: string; editedPlan?: string }) => void;
   'run:approve-script': (data: { runId: string }) => void;
   'run:reject-script': (data: { runId: string; feedback: string }) => void;
+  'run:rerun-script': (data: { runId: string }) => void;
+  'run:restore': (data: { runId: string; execute?: boolean }) => void;
   'run:replan': (data: { runId: string; feedback: string }) => void;
 }
 
@@ -86,6 +88,14 @@ export function emitApproveScript(runId: string) {
 
 export function emitRejectScript(runId: string, feedback: string) {
   socket.emit('run:reject-script', { runId, feedback });
+}
+
+export function emitRerunScript(runId: string) {
+  socket.emit('run:rerun-script', { runId });
+}
+
+export function emitRestoreRun(runId: string, execute?: boolean) {
+  socket.emit('run:restore', { runId, execute });
 }
 
 export function emitReplan(runId: string, feedback: string) {

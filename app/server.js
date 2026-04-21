@@ -93,6 +93,92 @@ app.get('/api/runs', (req, res) => {
   res.json(runs);
 });
 
+// Scan /tmp for previous qodo-team run directories
+app.get('/api/previous-runs', (req, res) => {
+  try {
+    const tmpDir = '/tmp';
+    const entries = fs.readdirSync(tmpDir, { withFileTypes: true });
+    const runs = [];
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith('qodo-team-')) continue;
+
+      const runId = entry.name.replace('qodo-team-', '');
+      const dirPath = path.join(tmpDir, entry.name);
+
+      // Check what files exist
+      let files;
+      try {
+        files = fs.readdirSync(dirPath);
+      } catch { continue; }
+
+      const hasScript = files.includes('run.sh');
+      const hasPlan = files.includes('plan.md');
+      const logFiles = files.filter(f => f.endsWith('.log'));
+
+      // Get directory stats for timestamp
+      let stat;
+      try {
+        stat = fs.statSync(dirPath);
+      } catch { continue; }
+
+      // Try to extract project path and prompt context from the script
+      let projectPath = '';
+      let scriptSize = 0;
+      if (hasScript) {
+        try {
+          const scriptPath = path.join(dirPath, 'run.sh');
+          const scriptStat = fs.statSync(scriptPath);
+          scriptSize = scriptStat.size;
+          const scriptHead = fs.readFileSync(scriptPath, 'utf-8').substring(0, 2000);
+          const projMatch = scriptHead.match(/^PROJ="([^"]+)"/m);
+          if (projMatch) projectPath = projMatch[1];
+        } catch { /* ignore */ }
+      }
+
+      // Try to get a brief summary from plan.md
+      let planSummary = '';
+      if (hasPlan) {
+        try {
+          const planContent = fs.readFileSync(path.join(dirPath, 'plan.md'), 'utf-8');
+          // Get first heading or first non-empty line
+          const headingMatch = planContent.match(/^#\s+(.+)/m);
+          if (headingMatch) {
+            planSummary = headingMatch[1].substring(0, 120);
+          } else {
+            const firstLine = planContent.split('\n').find(l => l.trim().length > 0);
+            if (firstLine) planSummary = firstLine.trim().substring(0, 120);
+          }
+        } catch { /* ignore */ }
+      }
+
+      // Check if this run is already active in memory
+      const isActive = activeRuns.has(runId);
+
+      runs.push({
+        id: runId,
+        dirPath,
+        hasScript,
+        hasPlan,
+        logFiles,
+        projectPath,
+        planSummary,
+        scriptSize,
+        isActive,
+        modifiedAt: stat.mtime.toISOString(),
+        createdAt: stat.birthtime.toISOString(),
+      });
+    }
+
+    // Sort by most recent first
+    runs.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
+
+    res.json(runs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/runs/:id', (req, res) => {
   const run = activeRuns.get(req.params.id);
   if (!run) return res.status(404).json({ error: 'Run not found' });
@@ -105,6 +191,33 @@ app.get('/api/runs/:id', (req, res) => {
     generateModel: run.generateModel,
     planConversation: run.planConversation,
   });
+});
+
+app.delete('/api/previous-runs/:id', (req, res) => {
+  const runId = req.params.id;
+  const dirPath = `/tmp/qodo-team-${runId}`;
+
+  // Don't allow deleting active runs
+  const activeRun = activeRuns.get(runId);
+  if (activeRun) {
+    const proc = activeRun.process || activeRun.planProcess || activeRun.genProcess;
+    if (proc && proc.pid) {
+      return res.status(400).json({ error: 'Cannot delete an actively running run. Stop it first.' });
+    }
+    // Clean up from active runs map
+    if (activeRun.watcher) activeRun.watcher.close();
+    if (activeRun._pollInterval) clearInterval(activeRun._pollInterval);
+    activeRuns.delete(runId);
+  }
+
+  try {
+    if (fs.existsSync(dirPath)) {
+      fs.rmSync(dirPath, { recursive: true, force: true });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/runs/:id/stop', (req, res) => {
@@ -395,6 +508,141 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Restore a previous run from disk (load script + plan, optionally execute)
+  socket.on('run:restore', async (data) => {
+    const { runId, execute } = data;
+    const logDir = `/tmp/qodo-team-${runId}`;
+    const scriptPath = path.join(logDir, 'run.sh');
+
+    // Check if the directory exists
+    if (!fs.existsSync(logDir)) {
+      socket.emit('run:error', { error: `Run directory not found: ${logDir}` });
+      return;
+    }
+
+    // If already active, just join and send state
+    if (activeRuns.has(runId)) {
+      socket.join(runId);
+      socket.emit('run:created', { runId });
+      return;
+    }
+
+    // Read script from disk
+    let scriptContent = '';
+    let projectPath = '';
+    if (fs.existsSync(scriptPath)) {
+      scriptContent = fs.readFileSync(scriptPath, 'utf-8');
+      const projMatch = scriptContent.match(/^PROJ="([^"]+)"/m);
+      if (projMatch) projectPath = projMatch[1];
+    }
+
+    // Read plan from disk
+    let planOutput = '';
+    const planPath = path.join(logDir, 'plan.md');
+    if (fs.existsSync(planPath)) {
+      planOutput = fs.readFileSync(planPath, 'utf-8');
+    }
+
+    // Create the run object in memory
+    const run = {
+      id: runId,
+      prompt: '[Restored from previous run]',
+      projectPath,
+      logDir,
+      scriptPath,
+      planModel: 'anthropic/claude-sonnet-4-6',
+      generateModel: 'anthropic/claude-sonnet-4-6',
+      status: scriptContent ? 'script-review' : (planOutput ? 'plan-review' : 'error'),
+      createdAt: new Date().toISOString(),
+      mainOutput: `[Restored previous run: ${runId}]\n[Directory: ${logDir}]\n`,
+      planOutput,
+      planConversation: planOutput ? [{ role: 'agent', content: planOutput }] : [],
+      scriptContent,
+      phases: {},
+      process: null,
+      planProcess: null,
+      genProcess: null,
+      sessionId: null,
+      planSessionId: null,
+      watcher: null,
+      _planCurrentResponse: '',
+    };
+
+    if (projectPath) {
+      run.mainOutput += `[Project: ${projectPath}]\n`;
+    }
+    if (scriptContent) {
+      run.mainOutput += `[Script loaded: ${scriptPath} (${scriptContent.length} chars)]\n`;
+    }
+    if (planOutput) {
+      run.mainOutput += `[Plan loaded: ${planPath}]\n`;
+    }
+    run.mainOutput += '\n';
+
+    activeRuns.set(runId, run);
+    socket.join(runId);
+    socket.emit('run:created', { runId });
+
+    // If execute flag is set and we have a script, run it immediately
+    if (execute && scriptContent) {
+      run.mainOutput += '[Executing script...]\n\n';
+      io.to(runId).emit('run:output', { stream: 'main', data: run.mainOutput });
+      io.to(runId).emit('run:script', { content: scriptContent });
+
+      try {
+        await executeScript(run);
+      } catch (err) {
+        run.status = 'error';
+        io.to(runId).emit('run:error', { error: err.message });
+        io.to(runId).emit('run:status', { status: 'error' });
+      }
+    }
+  });
+
+  // User re-runs the script after failure (possibly after manual edits to run.sh)
+  socket.on('run:rerun-script', async (data) => {
+    const { runId } = data;
+    const run = activeRuns.get(runId);
+    if (!run) return;
+    if (run.status !== 'failed' && run.status !== 'stopped' && run.status !== 'error') return;
+
+    // Re-read the script from disk in case the user manually edited it
+    try {
+      if (fs.existsSync(run.scriptPath)) {
+        const updatedScript = fs.readFileSync(run.scriptPath, 'utf-8');
+        run.scriptContent = updatedScript;
+        io.to(runId).emit('run:script', { content: updatedScript });
+      }
+    } catch (err) {
+      // If we can't read the script, proceed with what we have
+    }
+
+    // Reset phase state for a fresh execution
+    run.phases = {};
+
+    // Close any existing watcher
+    if (run.watcher) {
+      run.watcher.close();
+      run.watcher = null;
+    }
+    if (run._pollInterval) {
+      clearInterval(run._pollInterval);
+      run._pollInterval = null;
+    }
+
+    const rerunMsg = `\n${'━'.repeat(60)}\n[Re-running script: ${run.scriptPath}]\n${'━'.repeat(60)}\n\n`;
+    run.mainOutput += rerunMsg;
+    io.to(runId).emit('run:output', { stream: 'main', data: rerunMsg });
+
+    try {
+      await executeScript(run);
+    } catch (err) {
+      run.status = 'error';
+      io.to(run.id).emit('run:error', { error: err.message });
+      io.to(run.id).emit('run:status', { status: 'error' });
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log(`Client disconnected: ${socket.id}`);
   });
@@ -527,8 +775,12 @@ function _spawnPlanCall(run, qodoArgs) {
       run.planSessionId = sessionMatch[1];
     }
 
-    // Record the agent response
-    const response = run._planCurrentResponse.trim();
+    // Record the agent response — strip ANSI codes from plan output
+    // eslint-disable-next-line no-control-regex
+    const response = run._planCurrentResponse.trim()
+      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+      .replace(/\x1b\][^\x07]*\x07/g, '')
+      .replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, '');
     if (response) {
       run.planConversation.push({ role: 'agent', content: response });
       run.planOutput = response; // latest plan is always the last agent response
@@ -559,6 +811,160 @@ function _spawnPlanCall(run, qodoArgs) {
     io.to(run.id).emit('run:error', { error: `Failed to start planner: ${err.message}` });
     io.to(run.id).emit('run:status', { status: 'error' });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Fix broken line continuations in generated bash scripts
+// ---------------------------------------------------------------------------
+// The qodo CLI (or the LLM) sometimes wraps long lines in ways that break
+// bash syntax. This function repairs the most common patterns:
+//   1. A line ending with a bare `\` where the *previous* line should have
+//      had the `\` at its end (i.e. the backslash got pushed to a new line).
+//   2. Comment lines that were split mid-sentence so the continuation is
+//      not preceded by `#`, causing bash to try to execute it as a command.
+//   3. Function call arguments split across lines without proper `\`
+//      continuation (e.g. `func "arg1"\n"arg2" \`).
+function fixBrokenLineContinuations(script) {
+  const lines = script.split('\n');
+  const fixed = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const nextLine = i + 1 < lines.length ? lines[i + 1] : null;
+
+    // Pattern 1: A line that is ONLY a backslash (possibly with whitespace).
+    // This means the previous line should have ended with ` \` and the
+    // backslash was incorrectly placed on its own line.
+    // Merge: append ` \` to the previous fixed line, skip this line.
+    if (/^\s*\\$/.test(line) && fixed.length > 0) {
+      // The previous line in `fixed` should get the trailing ` \`
+      const prev = fixed[fixed.length - 1];
+      if (!prev.trimEnd().endsWith('\\')) {
+        fixed[fixed.length - 1] = prev.trimEnd() + ' \\';
+      }
+      i++;
+      continue;
+    }
+
+    // Pattern 2: Current line is inside a `# ...` comment block but the
+    // next line is NOT a comment and looks like a continuation of the
+    // comment text (no leading #, not a valid bash statement start).
+    // This catches things like:
+    //   # rebuild-colour-system.sh — Rebuild component-library colour system to numeric
+    //   notation
+    // Fix: merge the next line into the current comment line.
+    if (/^\s*#/.test(line) && nextLine !== null &&
+        !/^\s*#/.test(nextLine) && !/^\s*$/.test(nextLine)) {
+      // Check if the next line looks like a stray word continuation
+      // (not a valid bash keyword/command start)
+      const trimmedNext = nextLine.trim();
+      const bashKeywords = /^(if|then|else|elif|fi|for|while|do|done|case|esac|function|return|exit|local|export|declare|set|echo|log|cat|grep|mkdir|command|read|\[|\[\[|&&|\|\||[A-Z_]+=|[a-z_]+=|\$|{|}|\)|#|$)/;
+      if (!bashKeywords.test(trimmedNext) && /^[a-zA-Z]/.test(trimmedNext)) {
+        fixed.push(line.trimEnd() + ' ' + trimmedNext);
+        i += 2;
+        continue;
+      }
+    }
+
+    // Pattern 3: A function/command call where the arguments are split
+    // across lines without `\`. Detect when a line ends with a quoted
+    // string and the next line starts with another quoted string that
+    // looks like it should be on the same line.
+    // e.g.:
+    //   run_phase "Phase 1: Do stuff"
+    //   "$LOG/phase1.log" \
+    // Fix: join them with a space.
+    if (nextLine !== null && /^"/.test(line.trimStart()) === false) {
+      const trimmedLine = line.trimEnd();
+      const trimmedNext = nextLine.trimStart();
+      if (/^"[^"]*"$/.test(trimmedLine.split(/\s+/).pop() || '') === false &&
+          trimmedLine.endsWith('"') &&
+          trimmedNext.startsWith('"') &&
+          !trimmedLine.endsWith('\\')) {
+        // This looks like a split argument list — join them
+        fixed.push(trimmedLine + ' ' + nextLine.trimEnd());
+        i += 2;
+        continue;
+      }
+    }
+
+    fixed.push(line);
+    i++;
+  }
+
+  return fixed.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Extract bash script from raw qodo CLI output
+// ---------------------------------------------------------------------------
+// The qodo CLI in --ci mode outputs everything to stdout: initialization
+// messages, ANSI escape codes, tool call results, thinking steps, and the
+// actual script content. This function extracts just the bash script.
+function extractBashScript(rawOutput) {
+  // Step 1: Strip ANSI escape codes
+  // eslint-disable-next-line no-control-regex
+  const ansiStripped = rawOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+                                .replace(/\x1b\][^\x07]*\x07/g, '')   // OSC sequences
+                                .replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, '');
+
+  // Step 2: Try to find a bash script inside markdown code fences
+  const fenceMatch = ansiStripped.match(/```(?:bash|sh|shell)?\s*\n(#!\/bin\/bash[\s\S]*?)\n```/);
+  if (fenceMatch) {
+    return fenceMatch[1].trim();
+  }
+
+  // Step 3: Try to find the script by looking for #!/bin/bash
+  // The script should be the largest contiguous block starting with #!/bin/bash
+  const shebangIndex = ansiStripped.lastIndexOf('#!/bin/bash');
+  if (shebangIndex !== -1) {
+    let scriptBlock = ansiStripped.substring(shebangIndex);
+
+    // If there's trailing markdown fence, strip it
+    const trailingFence = scriptBlock.indexOf('\n```');
+    if (trailingFence !== -1) {
+      scriptBlock = scriptBlock.substring(0, trailingFence);
+    }
+
+    // Clean up: remove any trailing agent chatter after the script ends.
+    // A valid script typically ends with `done` or a log statement.
+    // Look for patterns that indicate the script has ended and agent is talking:
+    // - Lines that start with common agent output patterns after the script
+    const agentChatterPatterns = [
+      /\n(?:The script |I've |This script |Here's |Note:|---|\*\*)/,
+      /\n(?:This will |Make sure |You can |To run )/,
+    ];
+    for (const pattern of agentChatterPatterns) {
+      const chatterMatch = scriptBlock.match(pattern);
+      if (chatterMatch && chatterMatch.index > scriptBlock.length * 0.5) {
+        // Only trim if the chatter is in the latter half of the output
+        scriptBlock = scriptBlock.substring(0, chatterMatch.index);
+      }
+    }
+
+    return scriptBlock.trim();
+  }
+
+  // Step 4: Try to find it via the write_file tool output
+  // qodo sometimes uses a write_file tool which shows the file content in a diff
+  const writeFileMatch = ansiStripped.match(/\+#!\/bin\/bash\n([\s\S]*?)(?:\n`---|$)/);
+  if (writeFileMatch) {
+    // Reconstruct from diff lines (strip leading +)
+    const diffContent = '#!/bin/bash\n' + writeFileMatch[1];
+    const cleaned = diffContent.replace(/^\+/gm, '');
+    return cleaned.trim();
+  }
+
+  // Step 5: Fallback — just clean up what we have
+  let fallback = ansiStripped.trim();
+  if (fallback.startsWith('```')) {
+    fallback = fallback.replace(/^```(?:bash|sh)?\n?/, '').replace(/\n?```$/, '');
+  }
+  if (!fallback.startsWith('#!/')) {
+    fallback = '#!/bin/bash\n' + fallback;
+  }
+  return fallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -677,13 +1083,13 @@ Generate the complete bash script now. Output ONLY the script, nothing else.`;
       const sessionMatch = stderrContent.match(/session[_\s]*(?:id)?[:\s]*([a-f0-9-]+)/i);
       if (sessionMatch) run.sessionId = sessionMatch[1];
 
-      let cleaned = scriptContent.trim();
-      if (cleaned.startsWith('```')) {
-        cleaned = cleaned.replace(/^```(?:bash|sh)?\n?/, '').replace(/\n?```$/, '');
-      }
-      if (!cleaned.startsWith('#!/')) {
-        cleaned = '#!/bin/bash\n' + cleaned;
-      }
+      // The qodo CLI outputs everything to stdout: init messages, ANSI codes,
+      // tool calls, thinking, AND the actual script. We need to extract just
+      // the bash script from all that noise.
+      let cleaned = extractBashScript(scriptContent);
+
+      // Fix common line-wrapping issues that break bash syntax
+      cleaned = fixBrokenLineContinuations(cleaned);
 
       fs.writeFileSync(run.scriptPath, cleaned, { mode: 0o755 });
       run.scriptContent = cleaned;
@@ -738,8 +1144,21 @@ async function executeScript(run) {
     proc.on('close', (code) => {
       run.process = null;
       run.status = code === 0 ? 'completed' : 'failed';
+
+      // Finalize all phases: mark any still-running phases as done,
+      // and extract agent summaries from their accumulated output.
+      // Small delay to let the log watcher flush any remaining output.
+      setTimeout(() => {
+        finalizePhases(run, code);
+      }, 1000);
+
       io.to(run.id).emit('run:status', { status: run.status, exitCode: code });
-      if (run.watcher) run.watcher.close();
+      if (run.watcher) {
+        // Give the watcher a moment to flush remaining log data before closing
+        setTimeout(() => {
+          if (run.watcher) run.watcher.close();
+        }, 1500);
+      }
       const endMsg = `\n[Script ${run.status} with exit code ${code}]\n`;
       run.mainOutput += endMsg;
       io.to(run.id).emit('run:output', { stream: 'main', data: endMsg });
@@ -762,6 +1181,11 @@ function setupLogWatcher(run) {
   const logDir = run.logDir;
   const tailedFiles = new Map();
 
+  // Map from log file basename (e.g. "phase3_palette_types") to the canonical
+  // phaseId used in run.phases. This lets us merge log-file output into the
+  // phase entry that was already created by parsePhaseInfo from stdout.
+  const logToPhaseId = new Map();
+
   const watcher = chokidar.watch(logDir, {
     ignored: /(^|[\/\\])\../,
     persistent: true, ignoreInitial: false,
@@ -771,11 +1195,34 @@ function setupLogWatcher(run) {
   watcher.on('add', (filePath) => {
     if (!filePath.endsWith('.log')) return;
     const basename = path.basename(filePath, '.log');
-    const phaseId = basename;
-    const label = basename.replace(/_/g, ' ').replace(/^phase\d+\s*/, 'Phase ');
-    run.phases[phaseId] = { label: label || phaseId, status: 'running', output: '', logFile: filePath };
-    io.to(run.id).emit('run:phase', { phaseId, label: run.phases[phaseId].label, status: 'running', output: '' });
-    tailedFiles.set(filePath, { offset: 0, phaseId });
+
+    // Try to match this log file to an existing stdout-parsed phase.
+    // Log files are typically named "phase3_palette_types.log" — extract the
+    // phase number and look for an existing "phase3" entry.
+    const phaseNumMatch = basename.match(/^phase(\d+|N)/i);
+    let canonicalId = null;
+
+    if (phaseNumMatch) {
+      const stdoutPhaseId = `phase${phaseNumMatch[1]}`;
+      if (run.phases[stdoutPhaseId]) {
+        // Merge: attach the log file to the existing stdout-parsed phase
+        canonicalId = stdoutPhaseId;
+        run.phases[canonicalId].logFile = filePath;
+      }
+    }
+
+    if (!canonicalId) {
+      // No existing phase found — create a new entry from the log file name
+      canonicalId = basename;
+      const label = basename.replace(/_/g, ' ').replace(/^phase\d+\s*/, 'Phase ');
+      if (!run.phases[canonicalId]) {
+        run.phases[canonicalId] = { label: label || canonicalId, status: 'running', output: '', logFile: filePath };
+        io.to(run.id).emit('run:phase', { phaseId: canonicalId, label: run.phases[canonicalId].label, status: 'running', output: '' });
+      }
+    }
+
+    logToPhaseId.set(basename, canonicalId);
+    tailedFiles.set(filePath, { offset: 0, phaseId: canonicalId });
   });
 
   const pollInterval = setInterval(() => {
@@ -804,47 +1251,190 @@ function setupLogWatcher(run) {
 // ---------------------------------------------------------------------------
 // Parse phase info from main output
 // ---------------------------------------------------------------------------
+// We buffer incomplete lines across stdout chunks so that a ✅ or ❌ line
+// split across two data events is still detected correctly.
 function parsePhaseInfo(run, text) {
-  const phaseStartRegex = /PHASE\s+(\d+|N)\s*\[([^\]]+)\]:\s*(.+)/g;
-  let match;
-  while ((match = phaseStartRegex.exec(text)) !== null) {
-    const [, phaseNum, model, label] = match;
-    const phaseId = `phase${phaseNum}`;
-    if (!run.phases[phaseId]) {
-      run.phases[phaseId] = { label: `Phase ${phaseNum}: ${label.trim()}`, model, status: 'running', output: '' };
-    } else {
-      run.phases[phaseId].label = `Phase ${phaseNum}: ${label.trim()}`;
-      run.phases[phaseId].model = model;
+  // Append to line buffer and split into complete lines
+  if (!run._phaseLineBuf) run._phaseLineBuf = '';
+  run._phaseLineBuf += text;
+  const lines = run._phaseLineBuf.split('\n');
+  // Keep the last (possibly incomplete) line in the buffer
+  run._phaseLineBuf = lines.pop() || '';
+
+  for (const line of lines) {
+    // --- Detect phase start: PHASE 3 [Sonnet]: Update palette types ---
+    const startMatch = line.match(/PHASE\s+(\d+|N)\s*\[([^\]]+)\]:\s*(.+)/);
+    if (startMatch) {
+      const [, phaseNum, model, label] = startMatch;
+      const phaseId = `phase${phaseNum}`;
+      if (!run.phases[phaseId]) {
+        run.phases[phaseId] = { label: `Phase ${phaseNum}: ${label.trim()}`, model, status: 'running', output: '' };
+      } else {
+        run.phases[phaseId].label = `Phase ${phaseNum}: ${label.trim()}`;
+        run.phases[phaseId].model = model;
+      }
+      io.to(run.id).emit('run:phase', { phaseId, label: run.phases[phaseId].label, model, status: 'running' });
     }
-    io.to(run.id).emit('run:phase', { phaseId, label: run.phases[phaseId].label, model, status: 'running' });
+
+    // --- Detect completion: ✅ lines from log_ok ---
+    // Template produces: [HH:MM:SS] ✅ Phase 3: Update palette types
+    // or from wait_all:  [HH:MM:SS] ✅   Phase 3: Update palette types
+    if (/✅/.test(line)) {
+      // Try to extract a phase number directly from the line
+      const phaseNumInLine = line.match(/Phase\s+(\d+|N)/i);
+      if (phaseNumInLine) {
+        const phaseId = `phase${phaseNumInLine[1]}`;
+        if (run.phases[phaseId] && run.phases[phaseId].status === 'running') {
+          run.phases[phaseId].status = 'completed';
+          io.to(run.id).emit('run:phase', { phaseId, ...run.phases[phaseId] });
+        }
+      } else {
+        // Fallback: check all running phases for label match
+        for (const [phaseId, phase] of Object.entries(run.phases)) {
+          if (phase.status === 'running' && phase.label && line.includes(phase.label)) {
+            phase.status = 'completed';
+            io.to(run.id).emit('run:phase', { phaseId, ...phase });
+          }
+        }
+      }
+    }
+
+    // --- Detect failure: ❌ lines from log_err ---
+    if (/❌/.test(line)) {
+      const phaseNumInLine = line.match(/Phase\s+(\d+|N)/i);
+      if (phaseNumInLine) {
+        const phaseId = `phase${phaseNumInLine[1]}`;
+        if (run.phases[phaseId] && run.phases[phaseId].status === 'running') {
+          run.phases[phaseId].status = 'failed';
+          io.to(run.id).emit('run:phase', { phaseId, ...run.phases[phaseId] });
+        }
+      } else {
+        for (const [phaseId, phase] of Object.entries(run.phases)) {
+          if (phase.status === 'running' && phase.label && line.includes(phase.label)) {
+            phase.status = 'failed';
+            io.to(run.id).emit('run:phase', { phaseId, ...phase });
+          }
+        }
+      }
+    }
+
+    // --- Detect skip: ⏭️ SKIP Phase 3 — already done ---
+    if (/⏭️/.test(line)) {
+      const skipPhaseNum = line.match(/Phase\s+(\d+|N)/i);
+      if (skipPhaseNum) {
+        const phaseId = `phase${skipPhaseNum[1]}`;
+        if (run.phases[phaseId]) {
+          run.phases[phaseId].status = 'skipped';
+          io.to(run.id).emit('run:phase', { phaseId, ...run.phases[phaseId] });
+        }
+      } else {
+        const skipMatch = line.match(/⏭️\s*SKIP\s*(.*?)—/);
+        if (skipMatch) {
+          const skipLabel = skipMatch[1].trim();
+          for (const [phaseId, phase] of Object.entries(run.phases)) {
+            if (phase.label && phase.label.includes(skipLabel)) {
+              phase.status = 'skipped';
+              io.to(run.id).emit('run:phase', { phaseId, ...phase });
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Finalize all phases when the script process exits.
+// Any phase still in 'running' state is transitioned based on exit code.
+// Also extracts agent summaries from accumulated log output.
+// ---------------------------------------------------------------------------
+function finalizePhases(run, exitCode) {
+  const terminalStatus = exitCode === 0 ? 'completed' : 'failed';
+
+  for (const [phaseId, phase] of Object.entries(run.phases)) {
+    if (phase.status === 'running') {
+      // Extract summary from the phase output before marking done
+      const summary = extractAgentSummary(phase.output || '');
+      phase.status = terminalStatus;
+      if (summary) phase.summary = summary;
+      io.to(run.id).emit('run:phase', { phaseId, ...phase });
+    } else if (!phase.summary && phase.output) {
+      // Phase already completed/failed but we haven't extracted summary yet
+      const summary = extractAgentSummary(phase.output);
+      if (summary) {
+        phase.summary = summary;
+        io.to(run.id).emit('run:phase', { phaseId, ...phase });
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Extract agent summary from raw qodo CLI output.
+// The agent typically ends with a natural-language summary of what it did,
+// after all tool calls are complete. We look for the last block of
+// non-tool-call text.
+// ---------------------------------------------------------------------------
+function extractAgentSummary(rawOutput) {
+  if (!rawOutput || rawOutput.length < 50) return '';
+
+  // Strip ANSI codes for analysis
+  // eslint-disable-next-line no-control-regex
+  const clean = rawOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+                         .replace(/\x1b\][^\x07]*\x07/g, '')
+                         .replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, '');
+
+  // The qodo agent output has tool calls marked with patterns like:
+  //   +- tool_name
+  //   |-- param: value
+  //   `--- [OK] or [ERR]
+  // The summary is the final block of plain text after the last tool call result.
+
+  // Find the last tool call result marker
+  const lastToolResult = Math.max(
+    clean.lastIndexOf('[OK]'),
+    clean.lastIndexOf('[ERR]'),
+    clean.lastIndexOf('`---'),
+  );
+
+  let summaryBlock = '';
+  if (lastToolResult !== -1) {
+    // Get everything after the last tool result line
+    const afterTools = clean.substring(lastToolResult);
+    const firstNewline = afterTools.indexOf('\n');
+    if (firstNewline !== -1) {
+      summaryBlock = afterTools.substring(firstNewline + 1).trim();
+    }
   }
 
-  if (/✅/.test(text)) {
-    for (const [phaseId, phase] of Object.entries(run.phases)) {
-      if (phase.status === 'running' && (text.includes(phase.label) || text.includes(phaseId))) {
-        phase.status = 'completed';
-        io.to(run.id).emit('run:phase', { phaseId, ...phase });
+  if (!summaryBlock) {
+    // Fallback: take the last ~500 chars and look for summary-like text
+    const tail = clean.substring(Math.max(0, clean.length - 1000)).trim();
+    // Look for common summary patterns
+    const summaryPatterns = [
+      /(?:Here's a summary|Summary of|All \d+ (?:files?|changes)|Changes made|I've (?:completed|updated|modified|made))([\s\S]*)/i,
+      /(?:###\s+(?:Summary|Changes|Results))([\s\S]*)/i,
+    ];
+    for (const pattern of summaryPatterns) {
+      const m = tail.match(pattern);
+      if (m) {
+        summaryBlock = m[0].trim();
+        break;
       }
     }
   }
-  if (/❌/.test(text)) {
-    for (const [phaseId, phase] of Object.entries(run.phases)) {
-      if (phase.status === 'running' && (text.includes(phase.label) || text.includes(phaseId))) {
-        phase.status = 'failed';
-        io.to(run.id).emit('run:phase', { phaseId, ...phase });
-      }
+
+  // Clean up and truncate
+  if (summaryBlock) {
+    // Remove any remaining tool-call artifacts
+    summaryBlock = summaryBlock.replace(/^\s*\+[-─]\s.*$/gm, '').trim();
+    // Limit to reasonable length
+    if (summaryBlock.length > 2000) {
+      summaryBlock = summaryBlock.substring(0, 2000) + '…';
     }
   }
-  const skipRegex = /⏭️\s*SKIP\s*(.*?)—/g;
-  while ((match = skipRegex.exec(text)) !== null) {
-    const skipLabel = match[1].trim();
-    for (const [phaseId, phase] of Object.entries(run.phases)) {
-      if (phase.label && phase.label.includes(skipLabel)) {
-        phase.status = 'skipped';
-        io.to(run.id).emit('run:phase', { phaseId, ...phase });
-      }
-    }
-  }
+
+  return summaryBlock;
 }
 
 // ---------------------------------------------------------------------------
