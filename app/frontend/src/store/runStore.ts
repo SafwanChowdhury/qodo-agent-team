@@ -15,6 +15,7 @@ const DEFAULT_MODEL = 'anthropic/claude-sonnet-4-6';
 const initialState = {
   view: 'setup' as const,
   projectPath: '',
+  contextFolders: [] as string[],
   prompt: '',
   planModel: DEFAULT_MODEL,
   generateModel: DEFAULT_MODEL,
@@ -31,6 +32,7 @@ const initialState = {
   scriptContent: '',
   generationOutput: '',
   showFolderBrowser: false,
+  folderBrowserMode: 'project' as const,
   browserPath: '',
   browserDirs: [] as Array<{ name: string; path: string }>,
   browserParent: '',
@@ -47,6 +49,18 @@ export const useRunStore = create<RunStore>((set) => ({
   setView: (view) => set({ view }),
 
   setProjectPath: (projectPath) => set({ projectPath }),
+
+  addContextFolder: (path) =>
+    set((state) => ({
+      contextFolders: state.contextFolders.includes(path)
+        ? state.contextFolders
+        : [...state.contextFolders, path],
+    })),
+
+  removeContextFolder: (path) =>
+    set((state) => ({
+      contextFolders: state.contextFolders.filter((f) => f !== path),
+    })),
 
   setPrompt: (prompt) => set({ prompt }),
 
@@ -109,6 +123,8 @@ export const useRunStore = create<RunStore>((set) => ({
     set((state) => ({ generationOutput: state.generationOutput + data })),
 
   setShowFolderBrowser: (showFolderBrowser) => set({ showFolderBrowser }),
+
+  setFolderBrowserMode: (folderBrowserMode) => set({ folderBrowserMode }),
 
   setBrowserData: ({ path, dirs, parent }) =>
     set({ browserPath: path, browserDirs: dirs, browserParent: parent }),

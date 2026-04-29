@@ -57,6 +57,7 @@ export interface BrowseResult {
 export interface RunState {
   view: 'setup' | 'run';
   projectPath: string;
+  contextFolders: string[];
   prompt: string;
   planModel: string;
   generateModel: string;
@@ -73,6 +74,7 @@ export interface RunState {
   scriptContent: string;
   generationOutput: string;
   showFolderBrowser: boolean;
+  folderBrowserMode: 'project' | 'context';
   browserPath: string;
   browserDirs: Array<{ name: string; path: string }>;
   browserParent: string;
@@ -84,6 +86,8 @@ export interface RunState {
 export interface RunActions {
   setView: (view: 'setup' | 'run') => void;
   setProjectPath: (path: string) => void;
+  addContextFolder: (path: string) => void;
+  removeContextFolder: (path: string) => void;
   setPrompt: (prompt: string) => void;
   setPlanModel: (model: string) => void;
   setGenerateModel: (model: string) => void;
@@ -101,6 +105,7 @@ export interface RunActions {
   setScriptContent: (content: string) => void;
   appendGenerationOutput: (data: string) => void;
   setShowFolderBrowser: (show: boolean) => void;
+  setFolderBrowserMode: (mode: 'project' | 'context') => void;
   setBrowserData: (data: { path: string; dirs: Array<{ name: string; path: string }>; parent: string }) => void;
   resetRun: () => void;
 }

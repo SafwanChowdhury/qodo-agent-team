@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   FolderOpen,
+  FolderPlus,
   Rocket,
   Zap,
   Clock,
@@ -16,6 +17,7 @@ import {
   X,
   History,
   ChevronsRight,
+  BookOpen,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -61,6 +63,13 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Cross-platform basename: handle both forward and back slashes (Windows paths
+// like `C:\Users\foo\proj` and POSIX paths like `/Users/foo/proj`).
+function basename(p: string): string {
+  if (!p) return '';
+  return p.split(/[\\/]+/).filter(Boolean).pop() || p;
+}
+
 // ---------------------------------------------------------------------------
 // Drawer Run Item
 // ---------------------------------------------------------------------------
@@ -76,9 +85,7 @@ interface DrawerRunItemProps {
 function DrawerRunItem({ run, onReview, onExecute, onDelete, deleting }: DrawerRunItemProps) {
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const projectName = run.projectPath
-    ? run.projectPath.split('/').filter(Boolean).pop() || run.projectPath
-    : null;
+  const projectName = run.projectPath ? basename(run.projectPath) : null;
 
   return (
     <div
@@ -399,7 +406,11 @@ export default function SetupPage() {
   const setGenerateModel = useRunStore((s) => s.setGenerateModel);
   const skipPlan = useRunStore((s) => s.skipPlan);
   const setSkipPlan = useRunStore((s) => s.setSkipPlan);
+  const contextFolders = useRunStore((s) => s.contextFolders);
+  const addContextFolder = useRunStore((s) => s.addContextFolder);
+  const removeContextFolder = useRunStore((s) => s.removeContextFolder);
   const setShowFolderBrowser = useRunStore((s) => s.setShowFolderBrowser);
+  const setFolderBrowserMode = useRunStore((s) => s.setFolderBrowserMode);
   const setRunId = useRunStore((s) => s.setRunId);
   const setView = useRunStore((s) => s.setView);
   const resetRun = useRunStore((s) => s.resetRun);
@@ -429,6 +440,7 @@ export default function SetupPage() {
     socket.emit('run:start', {
       prompt: prompt.trim(),
       projectPath: projectPath.trim(),
+      contextFolders,
       planModel,
       generateModel,
       skipPlan,
@@ -507,7 +519,10 @@ export default function SetupPage() {
                   variant="outline"
                   size="default"
                   className="shrink-0 gap-1.5"
-                  onClick={() => setShowFolderBrowser(true)}
+                  onClick={() => {
+                    setFolderBrowserMode('project');
+                    setShowFolderBrowser(true);
+                  }}
                 >
                   <FolderOpen className="h-4 w-4" />
                   Browse
@@ -515,6 +530,73 @@ export default function SetupPage() {
               </div>
               <p className="text-xs text-[#A08570] mt-1.5">
                 The root directory of the project the agent team will work on.
+              </p>
+            </div>
+
+            {/* Context Folders */}
+            <div className="px-6 py-5">
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-sm font-semibold text-[#2C1810]">
+                  <span className="flex items-center gap-1.5">
+                    <BookOpen className="h-3.5 w-3.5 text-[#8B6914]" />
+                    Context Folders
+                  </span>
+                </label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5 text-xs h-7"
+                  onClick={() => {
+                    setFolderBrowserMode('context');
+                    setShowFolderBrowser(true);
+                  }}
+                >
+                  <FolderPlus className="h-3.5 w-3.5" />
+                  Add Folder
+                </Button>
+              </div>
+
+              {contextFolders.length > 0 ? (
+                <div className="space-y-1.5">
+                  {contextFolders.map((folder) => {
+                    const folderName = basename(folder) || folder;
+                    return (
+                      <div
+                        key={folder}
+                        className="flex items-center gap-2 rounded-md bg-[#F9F6F1] border border-[#E6DCCB] px-3 py-2 group"
+                      >
+                        <FolderOpen className="h-3.5 w-3.5 text-[#8B6914] shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <span className="text-xs font-medium text-[#2C1810] block truncate">
+                            {folderName}
+                          </span>
+                          <span className="font-mono text-[10px] text-[#A08570] block truncate">
+                            {folder}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeContextFolder(folder)}
+                          className="p-1 rounded text-[#A08570] hover:text-[#B71C1C] hover:bg-[#B71C1C]/10 transition-colors opacity-0 group-hover:opacity-100"
+                          title="Remove context folder"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-md border border-dashed border-[#D4C5B0] bg-[#F9F6F1]/50 px-4 py-3 text-center">
+                  <p className="text-xs text-[#A08570]">
+                    No context folders added yet
+                  </p>
+                </div>
+              )}
+
+              <p className="text-xs text-[#A08570] mt-1.5">
+                Additional folders the agents can reference for context (read-only). These won't be modified.
               </p>
             </div>
 

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ChevronDown, ChevronUp, RotateCcw, AlertTriangle } from 'lucide-react';
+import { ChevronDown, ChevronUp, RotateCcw, RefreshCw, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { socket, emitApproveScript, emitRejectScript, emitRerunScript } from '@/lib/socket';
+import { socket, emitApproveScript, emitRejectScript, emitRerunScript, emitRegenerateScript } from '@/lib/socket';
 import { useRunStore } from '@/store/runStore';
 import { Stepper } from '@/components/Stepper';
 import { Terminal } from '@/components/Terminal';
@@ -127,9 +127,10 @@ interface FailedRunBarProps {
   status: RunStatus;
   scriptPath: string;
   onRerun: () => void;
+  onRegenerate?: () => void;
 }
 
-function FailedRunBar({ status, scriptPath, onRerun }: FailedRunBarProps) {
+function FailedRunBar({ status, scriptPath, onRerun, onRegenerate }: FailedRunBarProps) {
   const statusLabel =
     status === 'failed' ? 'failed' : status === 'stopped' ? 'was stopped' : 'encountered an error';
 
@@ -153,10 +154,22 @@ function FailedRunBar({ status, scriptPath, onRerun }: FailedRunBarProps) {
             Script execution {statusLabel}.
           </p>
           <p className="text-xs text-[#7A5C4A] mt-0.5">
-            You can edit <code className="font-mono text-[10px] bg-[#F3EDE3] px-1 py-0.5 rounded">{scriptPath}</code> on
-            disk and re-run, or re-run as-is to retry (skip checks will resume from where it left off).
+            Re-run <code className="font-mono text-[10px] bg-[#F3EDE3] px-1 py-0.5 rounded">{scriptPath}</code> to retry (skip checks will resume from where it left off), or regenerate a fresh script from the same plan.
           </p>
         </div>
+
+        {onRegenerate && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onRegenerate}
+            className="gap-1.5 shrink-0"
+            title="Generate a brand-new script from the same plan, then review it before execution"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            Regenerate Script
+          </Button>
+        )}
 
         <Button
           size="sm"
@@ -227,7 +240,9 @@ export default function RunPage() {
     }
   }, [runStatus]);
 
-  // Auto-show summary when execution transitions to a terminal state
+  // Auto-show summary when execution reaches a terminal state. This fires
+  // both for live transitions (running → completed) and for restored runs
+  // where the very first status received is already terminal.
   const TERMINAL_STATUSES: RunStatus[] = ['completed', 'failed', 'stopped', 'error'];
   useEffect(() => {
     const prev = prevStatusRef.current;
@@ -236,11 +251,12 @@ export default function RunPage() {
     if (
       runStatus &&
       TERMINAL_STATUSES.includes(runStatus) &&
-      prev !== null &&
-      !TERMINAL_STATUSES.includes(prev)
+      (prev === null || !TERMINAL_STATUSES.includes(prev))
     ) {
-      // Small delay to let final phase data flush in
-      const timer = setTimeout(() => setShowSummary(true), 1500);
+      // For a live transition give phase data a moment to flush; for a
+      // restored run we already have everything, so show right away.
+      const delay = prev === null ? 0 : 1500;
+      const timer = setTimeout(() => setShowSummary(true), delay);
       return () => clearTimeout(timer);
     }
 
@@ -271,6 +287,12 @@ export default function RunPage() {
   const handleRerunScript = useCallback(() => {
     if (routeRunId || runId) {
       emitRerunScript((routeRunId || runId)!);
+    }
+  }, [routeRunId, runId]);
+
+  const handleRegenerateScript = useCallback(() => {
+    if (routeRunId || runId) {
+      emitRegenerateScript((routeRunId || runId)!);
     }
   }, [routeRunId, runId]);
 
@@ -328,6 +350,7 @@ export default function RunPage() {
             runId={routeRunId ?? runId}
             onApprove={handleApproveScript}
             onReject={handleRejectScript}
+            onRegenerate={handleRegenerateScript}
             executionPhases={
               runStatus === 'running' || runStatus === 'completed' || runStatus === 'failed'
                 ? executionPhaseStatus
@@ -373,12 +396,21 @@ export default function RunPage() {
     handleRerunScript();
   }, [handleRerunScript]);
 
+  // Handler for regenerate from summary page — go back to run view so the
+  // user sees the generation stream + script-review UI.
+  const handleSummaryRegenerate = useCallback(() => {
+    setShowSummary(false);
+    handleRegenerateScript();
+  }, [handleRegenerateScript]);
+
   // Show summary page when execution is complete and showSummary is true
   if (showSummary && isTerminal) {
     return (
       <div className="flex flex-col flex-1 overflow-hidden bg-[#F9F6F1]">
         <Stepper runStatus={runStatus} />
+        <PromptBar prompt={prompt} />
         <SummaryPage
+          runId={routeRunId ?? runId}
           runStatus={runStatus!}
           prompt={prompt}
           phases={phases}
@@ -388,6 +420,8 @@ export default function RunPage() {
           onBackToRun={handleBackToRun}
           onNewRun={handleNewRun}
           onRerun={canRerun ? handleSummaryRerun : undefined}
+          onRegenerate={canRerun ? handleSummaryRegenerate : undefined}
+          onFollowUpSent={() => setActiveTab('main')}
           className="flex-1"
         />
       </div>
@@ -396,8 +430,8 @@ export default function RunPage() {
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-[#F9F6F1]">
-      <PromptBar prompt={prompt} />
       <Stepper runStatus={runStatus} />
+      <PromptBar prompt={prompt} />
 
       {/* Summary toggle button — shown when execution is done but user dismissed summary */}
       {isTerminal && !showSummary && (
@@ -417,7 +451,14 @@ export default function RunPage() {
         {renderTabContent()}
       </div>
 
-      {canRerun && <FailedRunBar status={runStatus!} scriptPath={scriptContent ? `run.sh` : ''} onRerun={handleRerunScript} />}
+      {canRerun && (
+        <FailedRunBar
+          status={runStatus!}
+          scriptPath={scriptContent ? `run.sh` : ''}
+          onRerun={handleRerunScript}
+          onRegenerate={handleRegenerateScript}
+        />
+      )}
       <RespondBar mode={respondMode} runId={routeRunId ?? runId} />
     </div>
   );
