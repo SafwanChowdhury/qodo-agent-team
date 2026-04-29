@@ -50,7 +50,7 @@ You review the plan in the browser with full markdown rendering. You can:
 - **Edit** — directly modify the plan text before approving
 
 ### Stage 3: Generate, Review & Execute
-A generator agent fills the bash template using the approved plan. You then review the generated script before execution:
+A generator agent fills the platform-appropriate template using the approved plan (`template.sh` on macOS/Linux, `template.ps1` on Windows). You then review the generated script before execution:
 - **Approve Script** — proceed to execution
 - **Request Changes** — provide feedback and regenerate the script
 - **Execute** — the script runs with real-time output streaming
@@ -79,21 +79,42 @@ You can dismiss the summary to return to the full log/tab view at any time, and 
 - **Interactive input** — Send responses to script prompts (checkpoints, confirmations)
 - **Follow-up chat** — After completion, continue the conversation using `--resume` to refine results
 - **Stop control** — Kill a running script and all child processes
-- **Re-runnable** — Re-run failed scripts (with optional manual edits to `run.sh`) or start fresh runs
-- **Previous runs** — Browse and restore previous runs from `/tmp/qodo-team-*` directories
+- **Re-runnable** — Re-run failed scripts (with optional manual edits to `run.sh` / `run.ps1`) or start fresh runs
+- **Previous runs** — Browse and restore previous runs from the OS temp directory (`/tmp/qodo-team-*` on macOS/Linux, `%TEMP%\qodo-team-*` on Windows)
 
 ## Requirements
 
+### All platforms
 - Node.js 18+
 - `qodo` CLI installed and authenticated
+
+### macOS / Linux
+- `bash`
 - The `template.sh` and `GUIDE.md` files in the parent directory
+
+### Windows
+- Windows PowerShell 5.1 (built into Windows) or PowerShell 7+ (`pwsh`)
+- The `template.ps1` and `GUIDE_WINDOWS.md` files in the parent directory
+- The server auto-detects Windows and switches to the PowerShell template + Windows guide. Generated scripts are saved as `run.ps1` and executed with `powershell -ExecutionPolicy Bypass -File run.ps1`.
+- Run the dev / start commands from PowerShell or `cmd.exe` (the npm scripts work on both).
 
 ## Configuration
 
-Set the port via environment variable:
+### Port
 
 ```bash
+# macOS / Linux
 PORT=4000 npm run dev
+```
+
+```powershell
+# Windows PowerShell
+$env:PORT = '4000'; npm run dev
+```
+
+```cmd
+:: Windows cmd.exe
+set PORT=4000 && npm run dev
 ```
 
 ## Architecture

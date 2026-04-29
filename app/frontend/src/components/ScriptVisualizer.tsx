@@ -16,6 +16,7 @@ import {
   MessageSquare,
   Send,
   AlertTriangle,
+  RefreshCw,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
@@ -466,6 +467,7 @@ interface ScriptVisualizerProps {
   runId?: string | null;
   onApprove?: () => void;
   onReject?: (feedback: string) => void;
+  onRegenerate?: () => void;
   executionPhases?: Record<string, { status: 'running' | 'completed' | 'failed' | 'skipped' }>;
   className?: string;
 }
@@ -476,6 +478,7 @@ export function ScriptVisualizer({
   runId,
   onApprove,
   onReject,
+  onRegenerate,
   executionPhases,
   className,
 }: ScriptVisualizerProps) {
@@ -783,6 +786,18 @@ export function ScriptVisualizer({
                 <MessageSquare className="h-3.5 w-3.5" />
                 Request Changes
               </Button>
+              {onRegenerate && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={onRegenerate}
+                  className="gap-1.5"
+                  title="Regenerate the script with the same plan (use this if the script came back truncated or broken)"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Regenerate
+                </Button>
+              )}
             </div>
 
             <Button

@@ -1,15 +1,28 @@
-import { useMemo } from 'react';
-import { CheckCircle2, XCircle, AlertTriangle, Clock, Layers, FileText, ArrowLeft, RotateCcw } from 'lucide-react';
+import { useMemo, useState, type KeyboardEvent } from 'react';
+import { CheckCircle2, XCircle, AlertTriangle, Clock, Layers, FileText, ArrowLeft, RotateCcw, RefreshCw, MessageSquare, Loader2, Send } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MarkdownRenderer } from '@/components/MarkdownRenderer';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Textarea } from '@/components/ui/textarea';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { useModels } from '@/hooks/useModels';
+import { useRunStore } from '@/store/runStore';
 import type { RunStatus, Phase } from '@/types';
 
 // ---------------------------------------------------------------------------
 // Props
 // ---------------------------------------------------------------------------
 interface SummaryPageProps {
+  runId: string | null;
   runStatus: RunStatus;
   prompt: string;
   phases: Record<string, Phase>;
@@ -19,6 +32,8 @@ interface SummaryPageProps {
   onBackToRun: () => void;
   onNewRun: () => void;
   onRerun?: () => void;
+  onRegenerate?: () => void;
+  onFollowUpSent?: () => void;
   className?: string;
 }
 
@@ -165,6 +180,7 @@ function PhaseSummaryCard({ phaseId, phase }: PhaseSummaryCardProps) {
 // Main Summary Page
 // ---------------------------------------------------------------------------
 export function SummaryPage({
+  runId,
   runStatus,
   prompt,
   phases,
@@ -174,10 +190,56 @@ export function SummaryPage({
   onBackToRun,
   onNewRun,
   onRerun,
+  onRegenerate,
+  onFollowUpSent,
   className,
 }: SummaryPageProps) {
   const statusCfg = STATUS_CONFIG[runStatus] || STATUS_CONFIG.error;
   const StatusIcon = statusCfg.icon;
+
+  const generateModel = useRunStore((s) => s.generateModel);
+  const { groupedModels, loading: modelsLoading, error: modelsError } = useModels();
+  const providerNames = Object.keys(groupedModels);
+
+  const [followUpText, setFollowUpText] = useState('');
+  const [followUpSending, setFollowUpSending] = useState(false);
+  const [followUpError, setFollowUpError] = useState<string | null>(null);
+  const [followUpModel, setFollowUpModel] = useState<string>(generateModel);
+
+  async function handleSendFollowUp() {
+    if (!runId || !followUpText.trim() || followUpSending) return;
+
+    setFollowUpSending(true);
+    setFollowUpError(null);
+    try {
+      const res = await fetch(`/api/runs/${runId}/follow-up`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: followUpText.trim(),
+          model: followUpModel,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Request failed (${res.status})`);
+      }
+      setFollowUpText('');
+      onFollowUpSent?.();
+      onBackToRun();
+    } catch (err) {
+      setFollowUpError(err instanceof Error ? err.message : 'Failed to send follow-up');
+    } finally {
+      setFollowUpSending(false);
+    }
+  }
+
+  function handleFollowUpKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      handleSendFollowUp();
+    }
+  }
 
   // Compute stats
   const stats = useMemo(() => {
@@ -240,6 +302,18 @@ export function SummaryPage({
               <ArrowLeft className="h-3.5 w-3.5" />
               View Logs
             </Button>
+            {canRerun && onRegenerate && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onRegenerate}
+                className="gap-1.5"
+                title="Generate a brand-new script from the same plan, then review it before execution"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Regenerate
+              </Button>
+            )}
             {canRerun && onRerun && (
               <Button
                 variant="default"
@@ -312,6 +386,95 @@ export function SummaryPage({
             </div>
           </div>
         )}
+
+        {/* ── Send Additional Instructions ── */}
+        <div>
+          <h2 className="text-sm font-bold text-[#2C1810] uppercase tracking-wider mb-3 flex items-center gap-2">
+            <MessageSquare className="h-4 w-4 text-[#6B2D6B]" />
+            Send Additional Instructions
+          </h2>
+          <div className="bg-white border border-[#D4C5B0] rounded-lg p-4 space-y-3">
+            <p className="text-xs text-[#7A5C4A] leading-relaxed">
+              Send a one-shot follow-up to the agent. The original task, final
+              status, and per-phase outcomes are included automatically as context.
+            </p>
+            <Textarea
+              value={followUpText}
+              onChange={(e) => setFollowUpText(e.target.value)}
+              onKeyDown={handleFollowUpKeyDown}
+              disabled={followUpSending || !runId}
+              placeholder="e.g. Now update the README to reflect the new module layout, and add a brief note about the migration step that failed."
+              className="min-h-[100px]"
+            />
+
+            <div className="flex flex-col gap-1">
+              <span className="text-[11px] font-medium text-[#7A5C4A] uppercase tracking-wider">
+                Model
+              </span>
+              <Select
+                value={followUpModel}
+                onValueChange={setFollowUpModel}
+                disabled={modelsLoading || followUpSending}
+              >
+                <SelectTrigger className="w-full sm:w-[280px]">
+                  {modelsLoading ? (
+                    <span className="text-[#A08570] flex items-center gap-1.5">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Loading…
+                    </span>
+                  ) : (
+                    <SelectValue placeholder="Select model" />
+                  )}
+                </SelectTrigger>
+                <SelectContent>
+                  {providerNames.map((provider) => (
+                    <SelectGroup key={provider}>
+                      <SelectLabel>{provider}</SelectLabel>
+                      {groupedModels[provider].map((m) => (
+                        <SelectItem key={m.id} value={m.id}>
+                          {m.label}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  ))}
+                  {providerNames.length === 0 && !modelsLoading && (
+                    <div className="px-2 py-3 text-xs text-[#A08570] text-center">
+                      No models available
+                    </div>
+                  )}
+                </SelectContent>
+              </Select>
+              {modelsError && (
+                <p className="text-[11px] text-[#B71C1C] flex items-center gap-1">
+                  <span>⚠</span> Could not load models: {modelsError}
+                </p>
+              )}
+            </div>
+
+            {followUpError && (
+              <p className="text-xs text-[#B71C1C]">{followUpError}</p>
+            )}
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] text-[#A08570]">
+                ⌘/Ctrl + Enter to send. You'll be returned to the Output view to watch the response.
+              </p>
+              <Button
+                size="sm"
+                variant="purple"
+                onClick={handleSendFollowUp}
+                disabled={followUpSending || !runId || !followUpText.trim()}
+                className="gap-1.5 shrink-0"
+              >
+                {followUpSending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Send className="h-3.5 w-3.5" />
+                )}
+                Send Follow-up
+              </Button>
+            </div>
+          </div>
+        </div>
 
         {/* ── Actions Footer ── */}
         <div className="flex items-center justify-between pt-4 border-t border-[#D4C5B0]">

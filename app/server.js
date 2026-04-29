@@ -3,10 +3,18 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { spawn } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const chokidar = require('chokidar');
 const treeKill = require('tree-kill');
+
+// ---------------------------------------------------------------------------
+// Platform detection
+// ---------------------------------------------------------------------------
+const isWindows = process.platform === 'win32';
+const homeDir = os.homedir();
+const tmpDir = os.tmpdir();
 
 const app = express();
 const server = http.createServer(app);
@@ -67,8 +75,36 @@ const activeRuns = new Map();
 // ---------------------------------------------------------------------------
 app.get('/api/models', (req, res) => res.json(AVAILABLE_MODELS));
 
+app.get('/api/platform', (req, res) => res.json({
+  platform: process.platform,
+  isWindows,
+  homeDir,
+  tmpDir,
+  pathSep: path.sep,
+}));
+
+// Enumerate accessible drive letters on Windows (A: through Z:).
+function listWindowsDrives() {
+  const dirs = [];
+  for (let c = 65; c <= 90; c++) {
+    const letter = String.fromCharCode(c);
+    const drivePath = `${letter}:\\`;
+    try {
+      fs.accessSync(drivePath);
+      dirs.push({ name: `${letter}:\\`, path: drivePath });
+    } catch { /* drive not present */ }
+  }
+  return dirs;
+}
+
 app.get('/api/browse', (req, res) => {
-  const dirPath = req.query.path || process.env.HOME || '/';
+  // Special sentinel — list available drive letters (Windows only).
+  // The frontend can request this when the user wants to switch drives.
+  if (isWindows && (req.query.path === '__drives__' || req.query.listDrives === '1')) {
+    return res.json({ current: '__drives__', parent: '', dirs: listWindowsDrives() });
+  }
+
+  const dirPath = req.query.path || homeDir || (isWindows ? 'C:\\' : '/');
   try {
     const resolved = path.resolve(dirPath);
     const entries = fs.readdirSync(resolved, { withFileTypes: true });
@@ -76,7 +112,18 @@ app.get('/api/browse', (req, res) => {
       .filter(e => e.isDirectory() && !e.name.startsWith('.'))
       .map(e => ({ name: e.name, path: path.join(resolved, e.name) }))
       .sort((a, b) => a.name.localeCompare(b.name));
-    res.json({ current: resolved, parent: path.dirname(resolved), dirs });
+
+    // On Windows, the parent of a drive root (e.g. `C:\`) is itself —
+    // surface our `__drives__` sentinel so the user can switch drives
+    // instead of getting stuck in a loop pressing "up".
+    let parent = path.dirname(resolved);
+    if (isWindows && parent === resolved) {
+      parent = '__drives__';
+    } else if (!isWindows && parent === resolved) {
+      parent = '';
+    }
+
+    res.json({ current: resolved, parent, dirs });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -93,10 +140,9 @@ app.get('/api/runs', (req, res) => {
   res.json(runs);
 });
 
-// Scan /tmp for previous qodo-team run directories
+// Scan temp directory for previous qodo-team run directories
 app.get('/api/previous-runs', (req, res) => {
   try {
-    const tmpDir = '/tmp';
     const entries = fs.readdirSync(tmpDir, { withFileTypes: true });
     const runs = [];
 
@@ -112,7 +158,7 @@ app.get('/api/previous-runs', (req, res) => {
         files = fs.readdirSync(dirPath);
       } catch { continue; }
 
-      const hasScript = files.includes('run.sh');
+      const hasScript = files.includes('run.sh') || files.includes('run.ps1');
       const hasPlan = files.includes('plan.md');
       const logFiles = files.filter(f => f.endsWith('.log'));
 
@@ -127,11 +173,13 @@ app.get('/api/previous-runs', (req, res) => {
       let scriptSize = 0;
       if (hasScript) {
         try {
-          const scriptPath = path.join(dirPath, 'run.sh');
+          const scriptFile = files.includes('run.ps1') ? 'run.ps1' : 'run.sh';
+          const scriptPath = path.join(dirPath, scriptFile);
           const scriptStat = fs.statSync(scriptPath);
           scriptSize = scriptStat.size;
           const scriptHead = fs.readFileSync(scriptPath, 'utf-8').substring(0, 2000);
-          const projMatch = scriptHead.match(/^PROJ="([^"]+)"/m);
+          // Match bash PROJ="..." or PowerShell $PROJ = "..."
+          const projMatch = scriptHead.match(/^(?:\$?PROJ)\s*=\s*"([^"]+)"/m);
           if (projMatch) projectPath = projMatch[1];
         } catch { /* ignore */ }
       }
@@ -195,7 +243,7 @@ app.get('/api/runs/:id', (req, res) => {
 
 app.delete('/api/previous-runs/:id', (req, res) => {
   const runId = req.params.id;
-  const dirPath = `/tmp/qodo-team-${runId}`;
+  const dirPath = path.join(tmpDir, `qodo-team-${runId}`);
 
   // Don't allow deleting active runs
   const activeRun = activeRuns.get(runId);
@@ -229,6 +277,7 @@ app.post('/api/runs/:id/stop', (req, res) => {
   }
   run.status = 'stopped';
   io.to(req.params.id).emit('run:status', { status: 'stopped' });
+  saveRunSummary(run, null);
   res.json({ ok: true });
 });
 
@@ -261,6 +310,7 @@ app.post('/api/runs/:id/chat', (req, res) => {
 
   const proc = spawn('qodo', qodoArgs, {
     cwd: run.projectPath, env: { ...process.env },
+    shell: isWindows,
   });
 
   run.process = proc;
@@ -285,6 +335,110 @@ app.post('/api/runs/:id/chat', (req, res) => {
     run.status = code === 0 ? 'completed' : 'failed';
     run.process = null;
     io.to(run.id).emit('run:status', { status: run.status });
+    saveRunSummary(run, code);
+  });
+
+  res.json({ ok: true });
+});
+
+// One-shot follow-up that fires a fresh `qodo --ci` (no session resume) with
+// the work context — original task, plan, script, phase outcomes, and a tail
+// of the execution output — embedded in the prompt. Used by the Summary page.
+function buildFollowUpContext(run) {
+  const phaseLines = Object.entries(run.phases || {}).map(([phaseId, phase]) => {
+    const label = phase.label || phaseId;
+    const summary = phase.summary
+      ? `\n  Summary: ${String(phase.summary).replace(/\n/g, '\n  ')}`
+      : '';
+    return `- ${label}: ${phase.status}${summary}`;
+  });
+
+  const phasesSection = phaseLines.length > 0
+    ? `\n\nPhase outcomes:\n${phaseLines.join('\n')}`
+    : '';
+
+  const truncate = (s, n) => (s && s.length > n ? `${s.slice(0, n)}\n...[truncated, ${s.length - n} more chars]` : s || '');
+
+  const planExcerpt = run.planOutput
+    ? `\n\n<plan>\n${truncate(run.planOutput, 8000)}\n</plan>`
+    : '';
+
+  const scriptExcerpt = run.scriptContent
+    ? `\n\n<script path="${run.scriptPath}">\n${truncate(run.scriptContent, 6000)}\n</script>`
+    : '';
+
+  const outputTail = run.mainOutput && run.mainOutput.length > 0
+    ? `\n\n<execution-output-tail>\n${run.mainOutput.slice(-4000)}\n</execution-output-tail>`
+    : '';
+
+  return `<work-context>
+Original task: ${run.prompt || '(none)'}
+Final run status: ${run.status}
+Project path: ${run.projectPath}
+Log directory: ${run.logDir}${phasesSection}${planExcerpt}${scriptExcerpt}${outputTail}
+</work-context>`;
+}
+
+app.post('/api/runs/:id/follow-up', (req, res) => {
+  const run = activeRuns.get(req.params.id);
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+
+  const { message, model } = req.body || {};
+  if (!message || !String(message).trim()) {
+    return res.status(400).json({ error: 'Message required' });
+  }
+  if (run.process) {
+    return res.status(409).json({ error: 'A process is already running for this run' });
+  }
+
+  const followUpModel = model || run.generateModel || 'anthropic/claude-sonnet-4-6';
+  const contextBlock = buildFollowUpContext(run);
+  const fullPrompt = `${contextBlock}\n\nFollow-up question:\n${String(message).trim()}`;
+
+  const qodoArgs = [
+    '--ci', '-y', '--permissions=rwx',
+    `--model=${followUpModel}`,
+    fullPrompt,
+  ];
+
+  const proc = spawn('qodo', qodoArgs, {
+    cwd: run.projectPath,
+    env: { ...process.env },
+    shell: isWindows,
+  });
+
+  run.process = proc;
+  run.status = 'chatting';
+  io.to(run.id).emit('run:status', { status: 'chatting' });
+
+  const header = `\n\n━━━ Follow-up (${followUpModel}) ━━━\n> ${String(message).trim()}\n\n`;
+  run.mainOutput += header;
+  io.to(run.id).emit('run:output', { stream: 'main', data: header });
+
+  proc.stdout.on('data', (data) => {
+    const text = data.toString();
+    run.mainOutput += text;
+    io.to(run.id).emit('run:output', { stream: 'main', data: text });
+  });
+  proc.stderr.on('data', (data) => {
+    const text = data.toString();
+    run.mainOutput += text;
+    io.to(run.id).emit('run:output', { stream: 'main', data: text });
+  });
+  proc.on('error', (err) => {
+    const text = `\n[follow-up spawn error: ${err.message}]\n`;
+    run.mainOutput += text;
+    io.to(run.id).emit('run:output', { stream: 'main', data: text });
+    run.status = 'failed';
+    run.process = null;
+    io.to(run.id).emit('run:status', { status: run.status });
+    saveRunSummary(run, null);
+  });
+  proc.on('close', (code) => {
+    run.status = code === 0 ? 'completed' : 'failed';
+    run.process = null;
+    io.to(run.id).emit('run:status', { status: run.status });
+    saveRunSummary(run, code);
   });
 
   res.json({ ok: true });
@@ -332,10 +486,11 @@ io.on('connection', (socket) => {
 
   // Start a new run
   socket.on('run:start', async (data) => {
-    const { prompt, projectPath, planModel, generateModel, skipPlan } = data;
+    const { prompt, projectPath, contextFolders, planModel, generateModel, skipPlan } = data;
     const runId = uuidv4().substring(0, 8);
-    const logDir = `/tmp/qodo-team-${runId}`;
-    const scriptPath = path.join(logDir, 'run.sh');
+    const logDir = path.join(tmpDir, `qodo-team-${runId}`);
+    const scriptExt = isWindows ? 'run.ps1' : 'run.sh';
+    const scriptPath = path.join(logDir, scriptExt);
 
     fs.mkdirSync(logDir, { recursive: true });
 
@@ -343,6 +498,7 @@ io.on('connection', (socket) => {
       id: runId,
       prompt,
       projectPath,
+      contextFolders: Array.isArray(contextFolders) ? contextFolders : [],
       logDir,
       scriptPath,
       planModel: planModel || 'anthropic/claude-sonnet-4-6',
@@ -508,11 +664,81 @@ io.on('connection', (socket) => {
     }
   });
 
+  // User asks to regenerate the script with no feedback (e.g. previous output
+  // was truncated / structurally broken, or execution failed and the user
+  // wants a fresh script attempt). Same plan, fresh generation.
+  socket.on('run:regenerate-script', async (data) => {
+    const { runId } = data;
+    console.log(`[run:regenerate-script] received for run ${runId}`);
+    const run = activeRuns.get(runId);
+    if (!run) {
+      const msg = `[Regenerate failed: run ${runId} is not active. Reload the run from History first.]\n`;
+      socket.emit('run:output', { stream: 'main', data: msg });
+      socket.emit('run:error', { error: `Run ${runId} not active in memory` });
+      return;
+    }
+    if (!run.planOutput) {
+      const msg = `[Regenerate failed: this run has no saved plan to regenerate from.]\n`;
+      run.mainOutput += msg;
+      io.to(runId).emit('run:output', { stream: 'main', data: msg });
+      return;
+    }
+    const allowedStatuses = ['script-review', 'failed', 'stopped', 'error', 'completed'];
+    if (!allowedStatuses.includes(run.status)) {
+      const msg = `[Regenerate not allowed in status "${run.status}". Allowed: ${allowedStatuses.join(', ')}.]\n`;
+      run.mainOutput += msg;
+      io.to(runId).emit('run:output', { stream: 'main', data: msg });
+      return;
+    }
+
+    // If a previous execution is in flight, stop it cleanly.
+    if (run.process) {
+      try { treeKill(run.process.pid); } catch (_) {}
+      run.process = null;
+    }
+    if (run.watcher) {
+      try { run.watcher.close(); } catch (_) {}
+      run.watcher = null;
+    }
+    if (run._pollInterval) {
+      clearInterval(run._pollInterval);
+      run._pollInterval = null;
+    }
+
+    // Reset phase state — a regenerated script will produce a new run.
+    run.phases = {};
+
+    const msg = '[Regenerating script with the same plan...]\n';
+    run.mainOutput += msg;
+    io.to(runId).emit('run:output', { stream: 'main', data: msg });
+
+    // Don't pass feedback — this is a "same plan, retry" path.
+    // Don't include the previous script as context either.
+    run._previousScript = null;
+    run._scriptFeedback = null;
+
+    try {
+      await runGenerateStage(run, null);
+      if (run.status !== 'stopped') {
+        run.status = 'script-review';
+        io.to(runId).emit('run:status', { status: 'script-review' });
+        const reviewMsg = '[Script regenerated — waiting for review before execution]\n';
+        run.mainOutput += reviewMsg;
+        io.to(runId).emit('run:output', { stream: 'main', data: reviewMsg });
+      }
+    } catch (err) {
+      run.status = 'error';
+      io.to(run.id).emit('run:error', { error: err.message });
+      io.to(run.id).emit('run:status', { status: 'error' });
+    }
+  });
+
   // Restore a previous run from disk (load script + plan, optionally execute)
   socket.on('run:restore', async (data) => {
     const { runId, execute } = data;
-    const logDir = `/tmp/qodo-team-${runId}`;
-    const scriptPath = path.join(logDir, 'run.sh');
+    const logDir = path.join(tmpDir, `qodo-team-${runId}`);
+    const scriptExt = isWindows ? 'run.ps1' : 'run.sh';
+    const scriptPath = path.join(logDir, scriptExt);
 
     // Check if the directory exists
     if (!fs.existsSync(logDir)) {
@@ -532,7 +758,8 @@ io.on('connection', (socket) => {
     let projectPath = '';
     if (fs.existsSync(scriptPath)) {
       scriptContent = fs.readFileSync(scriptPath, 'utf-8');
-      const projMatch = scriptContent.match(/^PROJ="([^"]+)"/m);
+      // Match bash PROJ="..." or PowerShell $PROJ = "..."
+      const projMatch = scriptContent.match(/^(?:\$?PROJ)\s*=\s*"([^"]+)"/m);
       if (projMatch) projectPath = projMatch[1];
     }
 
@@ -543,41 +770,99 @@ io.on('connection', (socket) => {
       planOutput = fs.readFileSync(planPath, 'utf-8');
     }
 
+    // Read saved terminal-state summary, if any
+    let summaryData = null;
+    const summaryPath = path.join(logDir, 'summary.json');
+    if (fs.existsSync(summaryPath)) {
+      try {
+        summaryData = JSON.parse(fs.readFileSync(summaryPath, 'utf-8'));
+      } catch (err) {
+        console.error(`[run:restore] failed to parse summary.json for ${runId}:`, err.message);
+      }
+    }
+
+    // Read the saved main output (from a finished run), if any
+    let savedMainOutput = '';
+    const mainLogPath = path.join(logDir, 'main.log');
+    if (fs.existsSync(mainLogPath)) {
+      try {
+        savedMainOutput = fs.readFileSync(mainLogPath, 'utf-8');
+      } catch (err) {
+        console.error(`[run:restore] failed to read main.log for ${runId}:`, err.message);
+      }
+    }
+
+    // Restoration mode:
+    //   - If the user clicked Execute we always start fresh (re-run the script).
+    //   - If the user clicked Review and a saved summary exists, restore the
+    //     terminal state so the SummaryPage can be re-displayed.
+    const hasTerminalSummary = !!summaryData &&
+      ['completed', 'failed', 'stopped', 'error'].includes(summaryData.status);
+    const restoreTerminal = !execute && hasTerminalSummary;
+
+    const banner = (() => {
+      let s = `[Restored previous run: ${runId}]\n[Directory: ${logDir}]\n`;
+      if (projectPath || summaryData?.projectPath) {
+        s += `[Project: ${summaryData?.projectPath || projectPath}]\n`;
+      }
+      if (scriptContent) {
+        s += `[Script loaded: ${scriptPath} (${scriptContent.length} chars)]\n`;
+      }
+      if (planOutput) {
+        s += `[Plan loaded: ${planPath}]\n`;
+      }
+      if (summaryData) {
+        s += `[Summary loaded: status=${summaryData.status}, phases=${Object.keys(summaryData.phases || {}).length}]\n`;
+      }
+      return s + '\n';
+    })();
+
+    // Compose mainOutput: if we have a saved main log and we're restoring the
+    // terminal state, surface the original output preceded by a small banner.
+    const composedMainOutput = restoreTerminal && savedMainOutput
+      ? `${banner}${savedMainOutput}`
+      : banner;
+
+    // Rehydrate phases from the saved summary so the SummaryPage and tabs work.
+    const restoredPhases = restoreTerminal && summaryData?.phases
+      ? Object.fromEntries(
+          Object.entries(summaryData.phases).map(([id, p]) => [id, {
+            label: p.label || id,
+            status: p.status || 'completed',
+            model: p.model || undefined,
+            output: '',
+            summary: p.summary || '',
+          }])
+        )
+      : {};
+
+    const fallbackStatus = scriptContent ? 'script-review' : (planOutput ? 'plan-review' : 'error');
+
     // Create the run object in memory
     const run = {
       id: runId,
-      prompt: '[Restored from previous run]',
-      projectPath,
+      prompt: summaryData?.prompt || '[Restored from previous run]',
+      projectPath: summaryData?.projectPath || projectPath,
+      contextFolders: Array.isArray(summaryData?.contextFolders) ? summaryData.contextFolders : [],
       logDir,
       scriptPath,
-      planModel: 'anthropic/claude-sonnet-4-6',
-      generateModel: 'anthropic/claude-sonnet-4-6',
-      status: scriptContent ? 'script-review' : (planOutput ? 'plan-review' : 'error'),
-      createdAt: new Date().toISOString(),
-      mainOutput: `[Restored previous run: ${runId}]\n[Directory: ${logDir}]\n`,
+      planModel: summaryData?.planModel || 'anthropic/claude-sonnet-4-6',
+      generateModel: summaryData?.generateModel || 'anthropic/claude-sonnet-4-6',
+      status: restoreTerminal ? summaryData.status : fallbackStatus,
+      createdAt: summaryData?.createdAt || new Date().toISOString(),
+      mainOutput: composedMainOutput,
       planOutput,
       planConversation: planOutput ? [{ role: 'agent', content: planOutput }] : [],
       scriptContent,
-      phases: {},
+      phases: restoredPhases,
       process: null,
       planProcess: null,
       genProcess: null,
-      sessionId: null,
-      planSessionId: null,
+      sessionId: summaryData?.sessionId || null,
+      planSessionId: summaryData?.planSessionId || null,
       watcher: null,
       _planCurrentResponse: '',
     };
-
-    if (projectPath) {
-      run.mainOutput += `[Project: ${projectPath}]\n`;
-    }
-    if (scriptContent) {
-      run.mainOutput += `[Script loaded: ${scriptPath} (${scriptContent.length} chars)]\n`;
-    }
-    if (planOutput) {
-      run.mainOutput += `[Plan loaded: ${planPath}]\n`;
-    }
-    run.mainOutput += '\n';
 
     activeRuns.set(runId, run);
     socket.join(runId);
@@ -653,14 +938,19 @@ io.on('connection', (socket) => {
 // (--chat is not a valid qodo flag; we use one-shot --ci calls and --resume)
 // ---------------------------------------------------------------------------
 function buildPlanPrompt(run) {
-  const templatePath = path.join(__dirname, '..', 'template.sh');
-  const guidePath = path.join(__dirname, '..', 'GUIDE.md');
+  const templateExt = isWindows ? 'template.ps1' : 'template.sh';
+  const templatePath = path.join(__dirname, '..', templateExt);
+  // Use the platform-matched GUIDE so the LLM sees the correct script syntax.
+  // GUIDE_WINDOWS.md describes PowerShell helpers; GUIDE.md describes bash.
+  const guideName = isWindows ? 'GUIDE_WINDOWS.md' : 'GUIDE.md';
+  const guidePath = path.join(__dirname, '..', guideName);
   const template = fs.readFileSync(templatePath, 'utf-8');
   const guide = fs.readFileSync(guidePath, 'utf-8');
 
+  const scriptType = isWindows ? 'PowerShell' : 'bash';
   return `You are planning a multi-agent orchestration script for a coding task.
 
-You have a GUIDE that explains how to structure agent team scripts, and a TEMPLATE that shows the bash script format.
+You have a GUIDE that explains how to structure agent team scripts, and a TEMPLATE that shows the ${scriptType} script format.
 
 Analyze the user's task and produce a detailed PLAN that covers:
 
@@ -683,7 +973,12 @@ USER'S TASK:
 ${run.prompt}
 
 PROJECT PATH: ${run.projectPath}
+${run.contextFolders && run.contextFolders.length > 0 ? `
+CONTEXT FOLDERS (read-only reference — do NOT modify files in these folders, but agents can read them for context):
+${run.contextFolders.map(f => '  - ' + f).join('\n')}
 
+These context folders contain reference material, shared libraries, or related code that agents should be aware of when planning. Include instructions in the plan for agents to read relevant files from these folders when needed.
+` : ''}
 Produce a clear, structured plan. Use markdown formatting.`;
 }
 
@@ -743,6 +1038,7 @@ function _spawnPlanCall(run, qodoArgs) {
     cwd: run.projectPath,
     env: { ...process.env },
     stdio: ['pipe', 'pipe', 'pipe'],
+    shell: isWindows,
   });
 
   run.planProcess = proc;
@@ -817,6 +1113,54 @@ function _spawnPlanCall(run, qodoArgs) {
 // Fix broken line continuations in generated bash scripts
 // ---------------------------------------------------------------------------
 // The qodo CLI (or the LLM) sometimes wraps long lines in ways that break
+// Validate a generated script for the structural issues that indicate the
+// model truncated, bailed out with prose, or skipped the phase body.
+// Returns an array of human-readable issue strings (empty = OK).
+function validateGeneratedScript(script, isWindows) {
+  const issues = [];
+  const len = script.length;
+
+  if (isWindows) {
+    if (!/\$ErrorActionPreference/m.test(script)) {
+      issues.push('missing $ErrorActionPreference (PowerShell prelude)');
+    }
+    if (!/\bRun-Phase\b|\bLaunch-Bg\b/.test(script)) {
+      issues.push('no Run-Phase or Launch-Bg calls — script has no phase execution');
+    }
+  } else {
+    if (!/^#!\/bin\/(bash|sh)/m.test(script)) {
+      issues.push('missing #!/bin/bash shebang');
+    }
+    if (!/\brun_phase\b|\blaunch_bg\b/.test(script)) {
+      issues.push('no run_phase or launch_bg calls — script has no phase execution');
+    }
+  }
+
+  if (len < 2000) {
+    issues.push(`script is suspiciously short (${len} chars) — likely truncated`);
+  }
+
+  // Detect prose endings — the most common LLM bail-out failure mode.
+  // We check the last non-empty 5 lines for English filler that doesn't
+  // belong in a script body.
+  const tail = script.split('\n').filter(l => l.trim()).slice(-5).join('\n');
+  const prosePatterns = [
+    /the full script is saved/i,
+    /^[^#$]*\bto run it\b\s*:?\s*$/im,
+    /^[^#$]*\bsaved at the path\b/im,
+    /^[^#$]*\bhere'?s? the\b/im,
+    /^[^#$]*\b\[script (?:continues|truncated)/im,
+  ];
+  for (const re of prosePatterns) {
+    if (re.test(tail)) {
+      issues.push('script ends with English prose — model bailed out before completing');
+      break;
+    }
+  }
+
+  return issues;
+}
+
 // bash syntax. This function repairs the most common patterns:
 //   1. A line ending with a bare `\` where the *previous* line should have
 //      had the `\` at its end (i.e. the backslash got pushed to a new line).
@@ -968,14 +1312,69 @@ function extractBashScript(rawOutput) {
 }
 
 // ---------------------------------------------------------------------------
+// Extract PowerShell script from raw qodo CLI output
+// ---------------------------------------------------------------------------
+function extractPowerShellScript(rawOutput) {
+  // Step 1: Strip ANSI escape codes
+  // eslint-disable-next-line no-control-regex
+  const ansiStripped = rawOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+                                .replace(/\x1b\][^\x07]*\x07/g, '')
+                                .replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, '');
+
+  // Step 2: Try to find a PowerShell script inside markdown code fences
+  const fenceMatch = ansiStripped.match(/```(?:powershell|ps1|pwsh)?\s*\n((?:\$ErrorActionPreference|# =====)[\s\S]*?)\n```/);
+  if (fenceMatch) {
+    return fenceMatch[1].trim();
+  }
+
+  // Step 3: Try to find the script by looking for $ErrorActionPreference or common PS patterns
+  const psPatterns = ['$ErrorActionPreference', '# ============='];
+  for (const pattern of psPatterns) {
+    const idx = ansiStripped.lastIndexOf(pattern);
+    if (idx !== -1) {
+      let scriptBlock = ansiStripped.substring(idx);
+
+      // If there's trailing markdown fence, strip it
+      const trailingFence = scriptBlock.indexOf('\n```');
+      if (trailingFence !== -1) {
+        scriptBlock = scriptBlock.substring(0, trailingFence);
+      }
+
+      // Remove trailing agent chatter
+      const agentChatterPatterns = [
+        /\n(?:The script |I've |This script |Here's |Note:|---|\*\*)/,
+        /\n(?:This will |Make sure |You can |To run )/,
+      ];
+      for (const cp of agentChatterPatterns) {
+        const chatterMatch = scriptBlock.match(cp);
+        if (chatterMatch && chatterMatch.index > scriptBlock.length * 0.5) {
+          scriptBlock = scriptBlock.substring(0, chatterMatch.index);
+        }
+      }
+
+      return scriptBlock.trim();
+    }
+  }
+
+  // Step 4: Fallback
+  let fallback = ansiStripped.trim();
+  if (fallback.startsWith('```')) {
+    fallback = fallback.replace(/^```(?:powershell|ps1)?\n?/, '').replace(/\n?```$/, '');
+  }
+  return fallback;
+}
+
+// ---------------------------------------------------------------------------
 // Stage 2: Generate — uses the plan to fill the template into a script
 // ---------------------------------------------------------------------------
 async function runGenerateStage(run, scriptFeedback) {
   run.status = 'generating';
   io.to(run.id).emit('run:status', { status: 'generating' });
 
-  const templatePath = path.join(__dirname, '..', 'template.sh');
-  const guidePath = path.join(__dirname, '..', 'GUIDE.md');
+  const templateExt = isWindows ? 'template.ps1' : 'template.sh';
+  const templatePath = path.join(__dirname, '..', templateExt);
+  const guideName = isWindows ? 'GUIDE_WINDOWS.md' : 'GUIDE.md';
+  const guidePath = path.join(__dirname, '..', guideName);
   const template = fs.readFileSync(templatePath, 'utf-8');
   const guide = fs.readFileSync(guidePath, 'utf-8');
 
@@ -1012,18 +1411,24 @@ END OF PREVIOUS SCRIPT.
 `;
   }
 
-  const generatePrompt = `You are a script generator. You have a plan, a guide, and a bash template.
+  const scriptType = isWindows ? 'PowerShell' : 'bash';
+  const firstLine = isWindows ? '$ErrorActionPreference = "Continue"' : '#!/bin/bash';
+  const endMarker = isWindows ? '# === END OF SCRIPT ===' : '# === END OF SCRIPT ===';
+  const interactiveRule = isWindows
+    ? 'The script MUST be non-interactive. Replace ALL Read-Host calls with automatic continuation. In Run-Phase, on failure just log and continue. In Wait-AllBg, on failure just log and continue. Remove Show-Checkpoint prompts — just log the message.'
+    : 'The script MUST be non-interactive. Replace ALL `read -rp` calls with automatic continuation. In run_phase, on failure just log and continue. In wait_all, on failure just log and continue. Remove checkpoint() read prompts — just log the message.';
+  const parallelRule = isWindows
+    ? 'For parallel phases, use Launch-Bg/Wait-AllBg (PowerShell background jobs).'
+    : 'For parallel phases, use launch_bg/wait_all (NOT tmux). Remove all tmux code entirely.';
+  const phaseCallNames = isWindows ? 'Run-Phase / Launch-Bg' : 'run_phase / launch_bg';
 
-Your job: Using the PLAN below, produce a COMPLETE, RUNNABLE bash script based on the template. Fill in ALL {{PLACEHOLDER}} values. Remove all AGENT: comments. The script must be ready to execute with no manual editing.
+  const generatePrompt = `You are a script transcriber. You receive a PLAN, a GUIDE, and a ${scriptType} TEMPLATE. Your job is to MECHANICALLY assemble the final, runnable ${scriptType} script by filling the template with the plan's contents.
 
-CRITICAL RULES:
-1. The script MUST be non-interactive. Replace ALL \`read -rp\` calls with automatic continuation. In run_phase, on failure just log and continue. In wait_all, on failure just log and continue. Remove checkpoint() read prompts — just log the message. Remove the phase plan "Press Enter" prompt.
-2. Set PROJ="${run.projectPath}"
-3. Set LOG="${run.logDir}"
-4. For parallel phases, use launch_bg/wait_all (NOT tmux). Remove all tmux code entirely.
-5. Each phase's log file must go into the LOG directory with descriptive names.
-6. Output ONLY the bash script. No markdown fences, no explanation. Just the raw script starting with #!/bin/bash.
-7. The OPUS and SONNET variables should use the models specified in the plan. Keep the --ci -y --permissions=rwx flags.
+This is a transcription task, not a generation task. Do not summarize. Do not describe what the script does. Do not write meta-commentary. Emit the actual script body, in full, as raw ${scriptType}.
+
+═══════════════════════════════════════════════════════════════
+INPUTS
+═══════════════════════════════════════════════════════════════
 
 ${planContext}
 
@@ -1037,9 +1442,47 @@ USER'S ORIGINAL TASK:
 ${run.prompt}
 
 PROJECT PATH: ${run.projectPath}
+${run.contextFolders && run.contextFolders.length > 0 ? `
+CONTEXT FOLDERS (read-only reference — agents can read files from these folders for context but must NOT modify them):
+${run.contextFolders.map(f => '  - ' + f).join('\n')}
 
+IMPORTANT: In the generated script, include the context folder paths in the brief so all agents know about them. When agents need to reference patterns, types, or code from these folders, instruct them to read from these paths. Do NOT use --dir with context folders — only use --dir with the project path. Instead, mention context folders in each phase's TASK prompt where relevant.
+` : ''}
 ${feedbackContext}
-Generate the complete bash script now. Output ONLY the script, nothing else.`;
+═══════════════════════════════════════════════════════════════
+OUTPUT CONTRACT — read this carefully, your output is validated
+═══════════════════════════════════════════════════════════════
+
+CONTENT RULES:
+1. ${interactiveRule} Remove the phase plan pause prompt.
+2. Set ${isWindows ? '$PROJ' : 'PROJ'}="${run.projectPath}"
+3. Set ${isWindows ? '$LOG' : 'LOG'}="${run.logDir}"
+4. ${parallelRule}
+5. Each phase's log file must go into the LOG directory with descriptive names (e.g. phase1_<short_name>.log).
+6. The OPUS and SONNET variables must use the models specified in the plan, with --ci -y --permissions=rwx flags preserved.
+7. Fill in ALL {{PLACEHOLDER}} values from the template. Remove ALL "AGENT:" comments.
+8. The script MUST contain the helper functions from the template AND a concrete ${phaseCallNames} call for EVERY phase listed in the plan. A script with only the header/config and no phase execution is INVALID.
+
+OUTPUT FORMAT (strict — any deviation breaks downstream parsing):
+- Begin your output with this exact line as the first character: ${firstLine}
+- End your output with this exact line as the very last line: ${endMarker}
+- Between those two lines, output ONLY the ${scriptType} script. No markdown fences. No explanations. No "Here's the script" preamble. No "The script has been saved" epilogue.
+- Do NOT write English prose anywhere in your output except inside ${scriptType} comments (lines starting with #) or inside string literals.
+
+EXAMPLES OF FORBIDDEN OUTPUT (do not do any of these):
+  ✗ Writing "Here is the complete script:" before ${firstLine}
+  ✗ Writing "The full script is saved at the path above. To run it:" anywhere
+  ✗ Wrapping output in \`\`\`bash ... \`\`\` fences
+  ✗ Writing "[script continues...]" or any placeholder
+  ✗ Stopping before all phases have ${phaseCallNames} calls
+  ✗ Omitting the ${endMarker} marker
+
+Self-check before you stop emitting:
+  1. Did you write ${firstLine} as the first line? If not, restart.
+  2. Did you write a ${phaseCallNames} call for every phase named in the plan? If not, keep going.
+  3. Did you write ${endMarker} as the last line? If not, write it now.
+
+Emit the script now. Start immediately with ${firstLine}.`;
 
   return new Promise((resolve, reject) => {
     const msg = '[Stage 2/3: Generating script from plan...]\n';
@@ -1055,6 +1498,7 @@ Generate the complete bash script now. Output ONLY the script, nothing else.`;
 
     const proc = spawn('qodo', qodoArgs, {
       cwd: run.projectPath, env: { ...process.env },
+      shell: isWindows,
     });
 
     run.genProcess = proc;
@@ -1085,14 +1529,33 @@ Generate the complete bash script now. Output ONLY the script, nothing else.`;
 
       // The qodo CLI outputs everything to stdout: init messages, ANSI codes,
       // tool calls, thinking, AND the actual script. We need to extract just
-      // the bash script from all that noise.
-      let cleaned = extractBashScript(scriptContent);
+      // the script from all that noise.
+      let cleaned;
+      if (isWindows) {
+        cleaned = extractPowerShellScript(scriptContent);
+      } else {
+        cleaned = extractBashScript(scriptContent);
+        // Fix common line-wrapping issues that break bash syntax
+        cleaned = fixBrokenLineContinuations(cleaned);
+      }
 
-      // Fix common line-wrapping issues that break bash syntax
-      cleaned = fixBrokenLineContinuations(cleaned);
+      // Strip the END OF SCRIPT marker (we only require it for validation)
+      cleaned = cleaned.replace(/\n*#\s*===\s*END OF SCRIPT\s*===\s*$/m, '').trimEnd() + '\n';
+
+      // Validate the generated script. If broken (truncated, prose-ended,
+      // missing phase calls), still write the file so the user can inspect it,
+      // but emit a warning so they know to regenerate rather than execute.
+      const issues = validateGeneratedScript(cleaned, isWindows);
 
       fs.writeFileSync(run.scriptPath, cleaned, { mode: 0o755 });
       run.scriptContent = cleaned;
+      run.scriptValidationIssues = issues;
+
+      if (issues.length > 0) {
+        const warnMsg = `\n⚠️  Generated script appears broken:\n${issues.map(i => '  • ' + i).join('\n')}\n\nClick "Regenerate" to retry, or inspect the script in the Raw view.\n\n`;
+        run.mainOutput += warnMsg;
+        io.to(run.id).emit('run:output', { stream: 'main', data: warnMsg });
+      }
 
       const doneMsg = `[Script generated: ${run.scriptPath}]\n[Script length: ${cleaned.length} chars]\n\n`;
       run.mainOutput += doneMsg;
@@ -1120,10 +1583,21 @@ async function executeScript(run) {
     run.mainOutput += msg;
     io.to(run.id).emit('run:output', { stream: 'main', data: msg });
 
-    const proc = spawn('bash', [run.scriptPath], {
-      cwd: run.projectPath,
-      env: { ...process.env, INTERACTIVE: '0', CHECKPOINTS: '0', FAIL_FAST: '0' },
-    });
+    // Use PowerShell on Windows, bash on Unix
+    let proc;
+    if (isWindows || run.scriptPath.endsWith('.ps1')) {
+      proc = spawn('powershell', [
+        '-ExecutionPolicy', 'Bypass', '-File', run.scriptPath,
+      ], {
+        cwd: run.projectPath,
+        env: { ...process.env, INTERACTIVE: '0', CHECKPOINTS: '0', FAIL_FAST: '0' },
+      });
+    } else {
+      proc = spawn('bash', [run.scriptPath], {
+        cwd: run.projectPath,
+        env: { ...process.env, INTERACTIVE: '0', CHECKPOINTS: '0', FAIL_FAST: '0' },
+      });
+    }
 
     run.process = proc;
     setupLogWatcher(run);
@@ -1150,6 +1624,7 @@ async function executeScript(run) {
       // Small delay to let the log watcher flush any remaining output.
       setTimeout(() => {
         finalizePhases(run, code);
+        saveRunSummary(run, code);
       }, 1000);
 
       io.to(run.id).emit('run:status', { status: run.status, exitCode: code });
@@ -1348,6 +1823,57 @@ function parsePhaseInfo(run, text) {
 // Any phase still in 'running' state is transitioned based on exit code.
 // Also extracts agent summaries from accumulated log output.
 // ---------------------------------------------------------------------------
+// Persist a snapshot of the run's terminal state to disk so the SummaryPage
+// can be re-displayed when the run is restored from /api/previous-runs.
+// Writes summary.json (metadata + phases) and main.log (full main output, capped).
+function saveRunSummary(run, exitCode = null) {
+  try {
+    const summary = {
+      schemaVersion: 1,
+      runId: run.id,
+      prompt: run.prompt,
+      projectPath: run.projectPath,
+      contextFolders: Array.isArray(run.contextFolders) ? run.contextFolders : [],
+      status: run.status,
+      exitCode: typeof exitCode === 'number' ? exitCode : null,
+      createdAt: run.createdAt,
+      finishedAt: new Date().toISOString(),
+      planModel: run.planModel,
+      generateModel: run.generateModel,
+      sessionId: run.sessionId || null,
+      planSessionId: run.planSessionId || null,
+      totalOutputChars: typeof run.mainOutput === 'string' ? run.mainOutput.length : 0,
+      phases: Object.fromEntries(
+        Object.entries(run.phases || {}).map(([id, p]) => [id, {
+          label: p.label,
+          status: p.status,
+          model: p.model || null,
+          summary: p.summary || '',
+        }])
+      ),
+    };
+    fs.writeFileSync(
+      path.join(run.logDir, 'summary.json'),
+      JSON.stringify(summary, null, 2)
+    );
+
+    // Persist the main output too, capped to keep disk usage sane.
+    const mainOutput = typeof run.mainOutput === 'string' ? run.mainOutput : '';
+    const cap = 1 * 1024 * 1024; // 1 MB
+    let toSave = mainOutput;
+    if (mainOutput.length > cap) {
+      const half = Math.floor(cap / 2);
+      toSave =
+        mainOutput.slice(0, half) +
+        `\n\n...[truncated ${mainOutput.length - cap} chars]...\n\n` +
+        mainOutput.slice(-half);
+    }
+    fs.writeFileSync(path.join(run.logDir, 'main.log'), toSave);
+  } catch (err) {
+    console.error(`[saveRunSummary] failed for run ${run.id}:`, err.message);
+  }
+}
+
 function finalizePhases(run, exitCode) {
   const terminalStatus = exitCode === 0 ? 'completed' : 'failed';
 

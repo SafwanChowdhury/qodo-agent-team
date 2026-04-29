@@ -12,16 +12,20 @@ import type { BrowseResult } from '@/types';
 
 export function FolderBrowser() {
   const showFolderBrowser = useRunStore((s) => s.showFolderBrowser);
+  const folderBrowserMode = useRunStore((s) => s.folderBrowserMode);
   const browserPath = useRunStore((s) => s.browserPath);
   const browserDirs = useRunStore((s) => s.browserDirs);
   const browserParent = useRunStore((s) => s.browserParent);
   const setBrowserData = useRunStore((s) => s.setBrowserData);
   const setShowFolderBrowser = useRunStore((s) => s.setShowFolderBrowser);
   const setProjectPath = useRunStore((s) => s.setProjectPath);
+  const addContextFolder = useRunStore((s) => s.addContextFolder);
 
   const [selectedDir, setSelectedDir] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const isContextMode = folderBrowserMode === 'context';
 
   const browse = useCallback(
     async (path: string) => {
@@ -65,7 +69,11 @@ export function FolderBrowser() {
   function handleSelect() {
     const chosen = selectedDir ?? browserPath;
     if (chosen) {
-      setProjectPath(chosen);
+      if (isContextMode) {
+        addContextFolder(chosen);
+      } else {
+        setProjectPath(chosen);
+      }
     }
     handleClose();
   }
@@ -84,12 +92,15 @@ export function FolderBrowser() {
     }
   }
 
+  const dialogTitle = isContextMode ? 'Add Context Folder' : 'Browse Folders';
+  const selectLabel = isContextMode ? 'Add as Context' : 'Select This Folder';
+
   return (
     <Dialog open={showFolderBrowser} onOpenChange={(open) => !open && handleClose()}>
       <DialogContent className="max-w-xl w-full p-0 gap-0 overflow-hidden">
         {/* Header */}
         <DialogHeader className="px-5 pt-5 pb-4 border-b border-[#D4C5B0]">
-          <DialogTitle>Browse Folders</DialogTitle>
+          <DialogTitle>{dialogTitle}</DialogTitle>
 
           <div className="mt-2 flex items-center gap-2 rounded-md bg-[#F9F6F1] border border-[#D4C5B0] px-3 py-2">
             <Folder className="h-3.5 w-3.5 text-[#5C1A1A] shrink-0" />
@@ -97,6 +108,13 @@ export function FolderBrowser() {
               {browserPath || '/'}
             </span>
           </div>
+
+          {isContextMode && (
+            <p className="text-xs text-[#A08570] mt-2">
+              Select a folder to use as additional context for the agent team.
+              This folder won't be modified — it's read-only reference material.
+            </p>
+          )}
         </DialogHeader>
 
         {/* Directory listing */}
@@ -187,7 +205,7 @@ export function FolderBrowser() {
               onClick={handleSelect}
               disabled={loading}
             >
-              Select This Folder
+              {selectLabel}
             </Button>
           </div>
         </div>

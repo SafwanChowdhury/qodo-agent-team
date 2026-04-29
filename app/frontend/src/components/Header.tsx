@@ -54,8 +54,13 @@ export function Header() {
 
   return (
     <header className="flex items-center justify-between h-14 px-6 border-b border-[#E6DCCB] bg-[#F9F6F1]/80 backdrop-blur-md shrink-0">
-      {/* Logo */}
-      <div className="flex items-center gap-3">
+      {/* Logo — click to return to setup/home */}
+      <button
+        type="button"
+        onClick={handleNewRun}
+        aria-label="Go to home"
+        className="flex items-center gap-3 rounded-md -mx-1 px-1 py-0.5 hover:opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5C1A1A] focus-visible:ring-offset-2 transition-opacity"
+      >
         <BrandMark size={22} className="text-[#5C1A1A]" />
         <div className="flex items-baseline gap-1.5 leading-none">
           <span className="font-display text-[17px] font-medium text-[#2C1810]">
@@ -65,7 +70,7 @@ export function Header() {
             Agent Team
           </span>
         </div>
-      </div>
+      </button>
 
       {/* Status + Run ID */}
       {view === 'run' && (
